@@ -1,4 +1,4 @@
-# RKHS segmentation — Python port (global-only)
+# RKHS segmentation: Python port (global-only)
 
 Bare-bones Python translation of the global-segmentation path from the MATLAB
 project in `../project_RKHS/`. Only the `cfg.mode.segmentation_variant = 'global'`
