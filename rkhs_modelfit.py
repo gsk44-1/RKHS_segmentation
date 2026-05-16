@@ -130,7 +130,7 @@ def default_config():
 # ---------------------------------------------------------------------------
 
 def _build_gaussian_kernel_matrix(n_gridx, n_gridy, sigma):
-    nx_denom = max(n_gridx - 1, 1)
+    nx_denom = max(n_gridx - 1, 1)#
     ny_denom = max(n_gridy - 1, 1)
     tx = np.arange(n_gridx) / nx_denom
     ty = np.arange(n_gridy) / ny_denom
@@ -549,7 +549,7 @@ def fit_rkhs_decomposition(image, cfg=None, *, verbose=False, **overrides):
     if image.ndim != 2:
         raise ValueError("image must be 2D (H, W)")
 
-    cfg = deepcopy(default_config()) if cfg is None else deepcopy(cfg)
+    cfg = deepcopy(default_config()) if cfg is None else deepcopy(cfg) #why deepcopy?
     if overrides:
         cfg = _apply_overrides(cfg, overrides)
 
