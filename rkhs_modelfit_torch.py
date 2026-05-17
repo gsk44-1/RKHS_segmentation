@@ -53,6 +53,8 @@ def default_config():
             "sigma_kerwidth":  12.0,
             "delta_rampwidth": 1e-4,
             "ell_numdirs":     12,
+            # See rkhs_modelfit.default_config: None -> ps^2 (paper default).
+            "num_offsets":     None,
         },
         "ptc": {
             "patchsize": 4,
@@ -92,7 +94,11 @@ def _build_gaussian_kernel_matrix_np(n_gridx, n_gridy, sigma):
     return (coeff * coeff) * K
 
 
-def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs):
+def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs, num_offsets=None):
+    """Same as rkhs_modelfit._build_heaviside_basis; see that file for the
+    full docstring. ``num_offsets=None`` -> ``n_gridx * n_gridy`` (the paper
+    default). Smaller values reduce Psi's column redundancy and thus PtP_op.
+    """
     nx_denom = max(n_gridx - 1, 1)
     ny_denom = max(n_gridy - 1, 1)
     tx = np.arange(n_gridx) / nx_denom
@@ -100,13 +106,15 @@ def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs):
 
     X = np.tile(tx, n_gridy)
     Y = np.repeat(ty, n_gridx)
-    n = n_gridx * n_gridy
+
+    if num_offsets is None:
+        num_offsets = n_gridx * n_gridy
 
     theta = np.linspace(0.0, 2.0 * np.pi, num_dirs, endpoint=False)
-    c = np.arange(n) / max(n - 1, 1)
+    c = np.arange(num_offsets) / max(num_offsets - 1, 1)
 
     C_all = np.tile(c, num_dirs)
-    Theta_all = np.repeat(theta, n)
+    Theta_all = np.repeat(theta, num_offsets)
 
     cos_t = np.cos(Theta_all)
     sin_t = np.sin(Theta_all)
@@ -193,6 +201,7 @@ def _build_cache(im_shape, cfg, device, dtype):
     sigma_k = cfg["bss"]["sigma_kerwidth"]
     delta   = cfg["bss"]["delta_rampwidth"]
     L       = cfg["bss"]["ell_numdirs"]
+    n_off   = cfg["bss"].get("num_offsets", None)
 
     gamma = cfg["mdl"]["gamma_smoothpen"]
     rho2  = cfg["opt"]["rho2_Wsplit"]
@@ -202,7 +211,7 @@ def _build_cache(im_shape, cfg, device, dtype):
 
     # --- float64 numpy build (matches rkhs_modelfit exactly) ---------------
     K_np   = _build_gaussian_kernel_matrix_np(ps, ps, sigma_k)
-    Psi_np = _build_heaviside_basis_np(ps, ps, delta, L)
+    Psi_np = _build_heaviside_basis_np(ps, ps, delta, L, num_offsets=n_off)
     Kt_np    = K_np.T
     Psit_np  = Psi_np.T
     KtPsi_np = Kt_np @ Psi_np

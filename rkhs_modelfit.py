@@ -107,6 +107,10 @@ def default_config():
             "sigma_kerwidth":  12.0,
             "delta_rampwidth": 1e-4,
             "ell_numdirs":     12,
+            # Number of arctan-ramp offsets sampled along [0, 1] per direction.
+            # None -> ps^2 (original paper recipe; highly redundant at large ps).
+            # Lower values (e.g. ps) substantially reduce ||Psi^T Psi||_op.
+            "num_offsets":     None,
         },
         "ptc": {
             "patchsize": 4,
@@ -146,7 +150,23 @@ def _build_gaussian_kernel_matrix(n_gridx, n_gridy, sigma):
     return (coeff * coeff) * K
 
 
-def _build_heaviside_basis(n_gridx, n_gridy, delta, num_dirs):
+def _build_heaviside_basis(n_gridx, n_gridy, delta, num_dirs, num_offsets=None):
+    """Build the Heaviside / arctan-ramp basis.
+
+    Each column is ``0.5 + (1/pi) arctan((cos(theta) X + sin(theta) Y + c) / delta)``
+    sampled on the patch grid. The basis has ``num_dirs * num_offsets`` columns;
+    along each direction theta we sample ``num_offsets`` offset positions c in
+    [0, 1].
+
+    ``num_offsets`` controls Psi's column redundancy:
+      * ``None`` (default) -> ``num_offsets = n_gridx * n_gridy = ps^2``,
+        matching the original paper construction.
+      * Smaller values reduce ||Psi^T Psi||_op (PtP_op) roughly proportionally
+        and free the beta prox-linear step to take meaningful sizes. A
+        sensible choice is ``num_offsets ~ n_gridx`` (one offset per pixel
+        of patch extent) paired with ``delta_rampwidth ~ 1/n_gridx`` so the
+        adjacent ramps are spaced at ~1 pixel and distinguishable.
+    """
     nx_denom = max(n_gridx - 1, 1)
     ny_denom = max(n_gridy - 1, 1)
     tx = np.arange(n_gridx) / nx_denom
@@ -154,13 +174,15 @@ def _build_heaviside_basis(n_gridx, n_gridy, delta, num_dirs):
 
     X = np.tile(tx, n_gridy)
     Y = np.repeat(ty, n_gridx)
-    n = n_gridx * n_gridy
+
+    if num_offsets is None:
+        num_offsets = n_gridx * n_gridy
 
     theta = np.linspace(0.0, 2.0 * np.pi, num_dirs, endpoint=False)
-    c = np.arange(n) / max(n - 1, 1)
+    c = np.arange(num_offsets) / max(num_offsets - 1, 1)
 
     C_all = np.tile(c, num_dirs)
-    Theta_all = np.repeat(theta, n)
+    Theta_all = np.repeat(theta, num_offsets)
 
     cos_t = np.cos(Theta_all)
     sin_t = np.sin(Theta_all)
@@ -243,6 +265,7 @@ def _build_cache(im_shape, cfg):
     sigma_k = cfg["bss"]["sigma_kerwidth"]
     delta   = cfg["bss"]["delta_rampwidth"]
     L       = cfg["bss"]["ell_numdirs"]
+    n_off   = cfg["bss"].get("num_offsets", None)
 
     gamma = cfg["mdl"]["gamma_smoothpen"]
     rho2  = cfg["opt"]["rho2_Wsplit"]
@@ -251,7 +274,9 @@ def _build_cache(im_shape, cfg):
     zeta2_safety = cfg["opt"].get("zeta2_betaprox_safety", 0.0)
 
     K   = _build_gaussian_kernel_matrix(ps, ps, sigma_k)     # (ps^2, ps^2)
-    Psi = _build_heaviside_basis(ps, ps, delta, L)           # (ps^2, ps^2*L)
+    Psi = _build_heaviside_basis(ps, ps, delta, L, num_offsets=n_off)
+    # Psi shape: (ps^2, L * num_offsets);
+    # default num_offsets = ps^2 reproduces the paper's (ps^2, L*ps^2) basis.
 
     Kt    = K.T
     Psit  = Psi.T
