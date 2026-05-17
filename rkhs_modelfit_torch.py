@@ -55,6 +55,12 @@ def default_config():
             "ell_numdirs":     12,
             # See rkhs_modelfit.default_config: None -> ps^2 (paper default).
             "num_offsets":     None,
+            # Gaussian decay applied to the edge basis functions:
+            #   psi(t) = (0.5 + (1/pi)*arctan(t/delta)) * exp(-edge_decay * t^2)
+            # where t is the unscaled signed distance from the edge line in
+            # normalised [0,1] patch coordinates.  Set to 0 or None to recover
+            # the original (non-decaying) Heaviside basis from the paper.
+            "edge_decay":      10.0,
         },
         "ptc": {
             "patchsize": 4,
@@ -94,10 +100,21 @@ def _build_gaussian_kernel_matrix_np(n_gridx, n_gridy, sigma):
     return (coeff * coeff) * K
 
 
-def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs, num_offsets=None):
+def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs,
+                              num_offsets=None, edge_decay=None):
     """Same as rkhs_modelfit._build_heaviside_basis; see that file for the
     full docstring. ``num_offsets=None`` -> ``n_gridx * n_gridy`` (the paper
     default). Smaller values reduce Psi's column redundancy and thus PtP_op.
+
+    If ``edge_decay`` is a positive number, a Gaussian envelope is applied::
+
+        psi(t) = (0.5 + (1/pi)*arctan(t/delta)) * exp(-edge_decay * t^2)
+
+    where ``t`` is the *unscaled* signed distance from the edge line
+    (``cos(theta)*X + sin(theta)*Y + c``).  This localises each basis
+    function around its edge so that the smooth RKHS component (Kd) is
+    forced to carry the background intensity.  Set to 0 or None to
+    recover the original (non-decaying) Heaviside from the paper.
     """
     nx_denom = max(n_gridx - 1, 1)
     ny_denom = max(n_gridy - 1, 1)
@@ -118,10 +135,17 @@ def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs, num_offsets=Non
 
     cos_t = np.cos(Theta_all)
     sin_t = np.sin(Theta_all)
-    Z = (cos_t[None, :] * X[:, None]
-         + sin_t[None, :] * Y[:, None]
-         + C_all[None, :]) / delta
-    return 0.5 + (1.0 / np.pi) * np.arctan(Z)
+    # Unscaled signed distance from the edge line
+    T_unscaled = (cos_t[None, :] * X[:, None]
+                  + sin_t[None, :] * Y[:, None]
+                  + C_all[None, :])
+    Z = T_unscaled / delta
+    H = 0.5 + (1.0 / np.pi) * np.arctan(Z)
+
+    if edge_decay and edge_decay > 0:
+        H = H * np.exp(-edge_decay * T_unscaled ** 2)
+
+    return H
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +226,7 @@ def _build_cache(im_shape, cfg, device, dtype):
     delta   = cfg["bss"]["delta_rampwidth"]
     L       = cfg["bss"]["ell_numdirs"]
     n_off   = cfg["bss"].get("num_offsets", None)
+    e_decay = cfg["bss"].get("edge_decay", None)
 
     gamma = cfg["mdl"]["gamma_smoothpen"]
     rho2  = cfg["opt"]["rho2_Wsplit"]
@@ -211,7 +236,8 @@ def _build_cache(im_shape, cfg, device, dtype):
 
     # --- float64 numpy build (matches rkhs_modelfit exactly) ---------------
     K_np   = _build_gaussian_kernel_matrix_np(ps, ps, sigma_k)
-    Psi_np = _build_heaviside_basis_np(ps, ps, delta, L, num_offsets=n_off)
+    Psi_np = _build_heaviside_basis_np(ps, ps, delta, L, num_offsets=n_off,
+                                       edge_decay=e_decay)
     Kt_np    = K_np.T
     Psit_np  = Psi_np.T
     KtPsi_np = Kt_np @ Psi_np
