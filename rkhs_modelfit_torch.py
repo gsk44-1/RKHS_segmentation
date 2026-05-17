@@ -220,6 +220,7 @@ def _build_cache(im_shape, cfg, device, dtype):
     A_d_np = (1.0 + rho2) * (Kt_np @ K_np) + 2.0 * gamma * K_np + zeta1 * np.eye(n1)
     A_d_inv_np = np.linalg.inv(A_d_np)
 
+    K_op   = float(np.linalg.norm(K_np, ord=2))
     PtP_op = float(np.linalg.norm(Psit_np @ Psi_np, ord=2))
     L_beta = (1.0 + rho2) * PtP_op
     if zeta2_safety > 0.0:
@@ -275,7 +276,7 @@ def _build_cache(im_shape, cfg, device, dtype):
         "K": K, "Kt": Kt, "Psi": Psi, "Psit": Psit, "KtPsi": KtPsi,
         "n1": n1, "n2": n2,
         "A_d_inv": A_d_inv,
-        "PtP_op": PtP_op, "L_beta": L_beta, "zeta2_eff": zeta2_eff,
+        "K_op": K_op, "PtP_op": PtP_op, "L_beta": L_beta, "zeta2_eff": zeta2_eff,
         "layout": layout,
         "patch_flat_idx":      patch_flat_idx,      # (P, ps^2)
         "patch_flat_idx_flat": patch_flat_idx_flat, # (P*ps^2,)
@@ -597,6 +598,15 @@ def fit_rkhs_decomposition(
     d_out    = state["patch"]["d"].t()
     beta_out = state["patch"]["beta"].t()
 
+    # Raw basis matrices, useful for inspecting conditioning ||K||, ||Psi^T Psi||,
+    # rank, column overlap, etc. when sweeping hyperparameters.
+    matrices_t = {
+        "K":       cache["K"],        # (ps^2, ps^2)
+        "Psi":     cache["Psi"],      # (ps^2, num_offsets * L)
+        "A_d_inv": cache["A_d_inv"],  # (ps^2, ps^2)
+        "KtPsi":   cache["KtPsi"],    # (ps^2, num_offsets * L)
+    }
+
     if return_numpy:
         result = {
             "Kd":       Kd_out.detach().cpu().numpy(),
@@ -604,6 +614,7 @@ def fit_rkhs_decomposition(
             "M":        (Kd_out + Pb_out).detach().cpu().numpy(),
             "d":        d_out.detach().cpu().numpy(),
             "beta":     beta_out.detach().cpu().numpy(),
+            "matrices": {k: v.detach().cpu().numpy() for k, v in matrices_t.items()},
         }
     else:
         result = {
@@ -612,11 +623,13 @@ def fit_rkhs_decomposition(
             "M":        Kd_out + Pb_out,
             "d":        d_out,
             "beta":     beta_out,
+            "matrices": matrices_t,
         }
     result.update({
         "cfg":     cfg,
         "history": history,
         "diagnostics": {
+            "K_op":      cache["K_op"],
             "PtP_op":    cache["PtP_op"],
             "L_beta":    cache["L_beta"],
             "zeta2_eff": cache["zeta2_eff"],

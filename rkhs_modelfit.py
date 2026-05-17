@@ -298,6 +298,7 @@ def _build_cache(im_shape, cfg):
     # non-expansive. For ps=4 L=12, ||Psi^T Psi||_op ~ 2014; with the
     # nominal zeta2=10 the iteration diverges by factor ~ 334 per step.
     # We auto-bump zeta2 here whenever zeta2_betaprox_safety > 0.
+    K_op   = float(np.linalg.norm(K, ord=2))
     PtP_op = float(np.linalg.norm(Psit @ Psi, ord=2))
     L_beta = (1.0 + rho2) * PtP_op
     if zeta2_safety > 0.0:
@@ -322,6 +323,7 @@ def _build_cache(im_shape, cfg):
         "K": K, "Kt": Kt, "Psi": Psi, "Psit": Psit, "KtPsi": KtPsi,
         "n1": n1, "n2": n2,
         "A_d_inv": A_d_inv,
+        "K_op":       K_op,
         "PtP_op":     PtP_op,
         "L_beta":     L_beta,
         "zeta2_eff":  zeta2_eff,
@@ -621,7 +623,16 @@ def fit_rkhs_decomposition(image, cfg=None, *, verbose=False, **overrides):
         "beta":     state["patch"]["beta"],
         "cfg":      cfg,
         "history":  history,
+        # Raw basis matrices and the d-update inverse, for users who want to
+        # inspect conditioning / column-overlap diagnostics directly.
+        "matrices": {
+            "K":       cache["K"],        # (ps^2, ps^2)
+            "Psi":     cache["Psi"],      # (ps^2, num_offsets * L)
+            "A_d_inv": cache["A_d_inv"],  # (ps^2, ps^2)
+            "KtPsi":   cache["KtPsi"],    # (ps^2, num_offsets * L)
+        },
         "diagnostics": {
+            "K_op":      cache["K_op"],
             "PtP_op":    cache["PtP_op"],
             "L_beta":    cache["L_beta"],
             "zeta2_eff": cache["zeta2_eff"],
