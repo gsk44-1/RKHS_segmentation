@@ -12,7 +12,7 @@ Within a single BCD iteration the patches are independent:
   * they WRITE to disjoint columns of d / beta / theta / b1 / beta_prev;
   * they ACCUMULATE into Kd_img / Pb_img via overlap averaging.
 
-So the inner double loop is embarrassingly parallel and is expressed
+So the inner double loop is expressed
 here as
 
     flat_image[idx]                   -> (P, ps^2)   batch extract

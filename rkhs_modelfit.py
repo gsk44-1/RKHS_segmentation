@@ -584,11 +584,16 @@ def fit_rkhs_decomposition(image, cfg=None, *, verbose=False, **overrides):
     state = _initialize_state(image, cache)
 
     if verbose:
-        print(f"[stage1] ||Psi^T Psi||_op = {cache['PtP_op']:.3f}, "
-              f"L_beta = (1+rho2)||Psi^T Psi|| = {cache['L_beta']:.3f}, "
-              f"zeta2_eff = {cache['zeta2_eff']:.3f} "
-              f"(user zeta2 = {cfg['opt']['zeta2_betaprox']:.3f}, "
-              f"safety = {cfg['opt'].get('zeta2_betaprox_safety', 0.0)})")
+        PtP_op = cache["PtP_op"]
+        L_beta = cache["L_beta"]
+        z2_eff = cache["zeta2_eff"]
+        z2_usr = cfg["opt"]["zeta2_betaprox"]
+        z2_saf = cfg["opt"].get("zeta2_betaprox_safety", 0.0)
+        print("[stage1] ||Psi^T Psi||_op = %.3f, "
+              "L_beta = (1+rho2)||Psi^T Psi|| = %.3f, "
+              "zeta2_eff = %.3f "
+              "(user zeta2 = %.3f, safety = %s)"
+              % (PtP_op, L_beta, z2_eff, z2_usr, z2_saf))
 
     n_iter  = int(cfg["opt"]["maxiter"])
     history = []
@@ -612,8 +617,8 @@ def fit_rkhs_decomposition(image, cfg=None, *, verbose=False, **overrides):
         })
         if verbose:
             beta_l1 = float(np.sum(np.abs(state["patch"]["beta"])))
-            print(f"iter {it+1:3d}/{n_iter}  "
-                  f"residual={residual:.6f}  |beta|_1={beta_l1:.6f}")
+            print("iter %3d/%d  residual=%.6f  |beta|_1=%.6f"
+                  % (it + 1, n_iter, residual, beta_l1))
 
     return {
         "Kd":       state["img"]["Kd"],
@@ -655,5 +660,5 @@ def _apply_overrides(cfg, overrides):
                 placed = True
                 break
         if not placed:
-            raise KeyError(f"unknown override: {k!r}")
+            raise KeyError("unknown override: %r" % k)
     return cfg
