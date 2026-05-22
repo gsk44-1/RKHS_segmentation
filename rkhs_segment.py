@@ -54,6 +54,11 @@ def default_config():
         zeta_inprox       : proximal weight on c1 update.
         zeta_outprox      : proximal weight on c2 update.
         maxiter           : number of outer iterations.
+      init : initialisation of mask when mask_init is not provided
+        mode              : 'zeros' | 'circle' | 'checkerboard' | 'rectangle'
+                            'zeros' reproduces the original all-zeros default.
+        radius_frac       : fraction of min(H,W)/2 for circle/rectangle (0.4)
+        block_size        : checkerboard block size in pixels (30)
     """
     return {
         "mdl": {
@@ -66,6 +71,11 @@ def default_config():
             "zeta_inprox":   1e-9,
             "zeta_outprox":  1e-9,
             "maxiter":       20,
+        },
+        "init": {
+            "mode":        "zeros",
+            "radius_frac": 0.4,
+            "block_size":  30,
         },
     }
 
@@ -186,6 +196,50 @@ def _update_membership(J, g, u, wx, wy, b2x, b2y, c1, c2, fft_cache, cfg):
 
 
 # ---------------------------------------------------------------------------
+# initialisation helpers
+# ---------------------------------------------------------------------------
+
+def _init_mask(H, W, cfg_init):
+    """Create an initial mask u_0 in {0, 1} from the init config.
+
+    Modes
+    -----
+    zeros       : all zeros (original default).
+    circle      : filled circle centred in the image.
+    rectangle   : filled rectangle centred in the image.
+    checkerboard: binary checkerboard pattern (0/1 blocks).
+    """
+    mode = cfg_init.get("mode", "zeros")
+
+    if mode == "zeros":
+        return np.zeros((H, W))
+
+    elif mode == "circle":
+        frac = cfg_init.get("radius_frac", 0.4)
+        cy, cx = H / 2.0, W / 2.0
+        r = frac * min(H, W) / 2.0
+        yy, xx = np.mgrid[:H, :W].astype(float)
+        return ((xx - cx)**2 + (yy - cy)**2 < r**2).astype(float)
+
+    elif mode == "rectangle":
+        frac = cfg_init.get("radius_frac", 0.4)
+        margin_y = int((1.0 - frac) * H / 2.0)
+        margin_x = int((1.0 - frac) * W / 2.0)
+        u = np.zeros((H, W))
+        u[margin_y:H - margin_y, margin_x:W - margin_x] = 1.0
+        return u
+
+    elif mode == "checkerboard":
+        bs = cfg_init.get("block_size", 30)
+        yy, xx = np.mgrid[:H, :W].astype(float)
+        return (np.sin(np.pi * xx / bs) * np.sin(np.pi * yy / bs) > 0
+                ).astype(float)
+
+    else:
+        raise ValueError(f"Unknown init mode: {mode!r}")
+
+
+# ---------------------------------------------------------------------------
 # public entry point
 # ---------------------------------------------------------------------------
 
@@ -202,10 +256,9 @@ def segment(M, g, mask_init=None, cfg=None, *, verbose=False, **overrides):
         Weights the TV penalty on grad(u) so that the boundary prefers to
         align with detected edges.
     mask_init : (H, W) array or None
-        Initial binary mask (will be cast to {0, 1}). If None, starts from
-        all zeros — note this can be very slow to evolve; providing any
-        reasonable init (e.g. a thresholded version of M, or a centred box)
-        is strongly recommended.
+        Initial binary mask (will be cast to {0, 1}). If None, initialised
+        according to ``cfg["init"]`` (default: all zeros; set ``mode`` to
+        'circle', 'checkerboard', or 'rectangle' for shaped inits).
     cfg : dict, optional
         Config dict shaped like ``default_config()``.
     verbose : bool
@@ -241,7 +294,8 @@ def segment(M, g, mask_init=None, cfg=None, *, verbose=False, **overrides):
 
     # --- initialise state ---
     if mask_init is None:
-        u = np.zeros((H, W))
+        cfg_init = cfg.get("init", {"mode": "zeros"})
+        u = _init_mask(H, W, cfg_init)
     else:
         u = (np.asarray(mask_init) > 0).astype(float)
 
@@ -347,7 +401,7 @@ def twostage_segment(image, mask_init=None, stage1_cfg=None, stage2_cfg=None,
 
 def _apply_overrides(cfg, overrides):
     """Route flat keyword overrides into the nested cfg dict."""
-    sections = ("mdl", "opt")
+    sections = ("mdl", "opt", "init")
     for k, v in overrides.items():
         placed = False
         for sec in sections:

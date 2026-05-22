@@ -46,8 +46,10 @@ def default_config():
     mdl : model / energy weights
         c           : constant balloon velocity.  0 gives the pure geodesic
                       flow (Eq. 13); nonzero adds an area penalty (Eq. 18).
-                      Positive c shrinks the contour (inward normal convention
-                      with phi < 0 inside).  (0.0)
+                      With our convention (phi > 0 inside), positive c
+                      expands the contour outward and negative c shrinks it.
+                      Note: this is sign-flipped relative to the paper, which
+                      uses phi < 0 inside.  (0.0)
         sigma       : std-dev for Gaussian smoothing of the image when
                       computing g internally.  Only used if g is not
                       provided.  (1.5)
@@ -78,7 +80,7 @@ def default_config():
             "dt":           0.1,
             "reinit_every": 10,
             "maxiter":      500,
-            "tol_length":   5.0,
+            "tol_length":   0.5,
             "tol_iters":    10,
         },
         "init": {
