@@ -55,6 +55,13 @@ def default_config():
         dt          : time step for the explicit Euler update  (0.1)
         epsilon     : width parameter for the smoothed Heaviside / Dirac
                       approximations  (1.0)
+        delta_mode  : 'wide' or 'narrow'.  Controls where the data driving
+                      force is active.  'narrow' (the paper's formulation)
+                      multiplies by delta_eps(phi), which localises the force
+                      near the zero level set — but can stall when phi grows
+                      large.  'wide' replaces delta_eps with 1 in the data
+                      force so it acts everywhere (the Heaviside H_eps is
+                      still used for region averaging).  Default 'wide'.
         maxiter     : maximum number of iterations  (500)
         tol_length  : threshold on |L(t) - L(t-1)| for the termination
                       criterion  (5.0)
@@ -76,6 +83,7 @@ def default_config():
         "opt": {
             "dt":         0.1,
             "epsilon":    1.0,
+            "delta_mode": "wide",
             "maxiter":    500,
             "tol_length": 5.0,
             "tol_iters":  10,
@@ -180,11 +188,17 @@ def _curvature(phi):
 # ---------------------------------------------------------------------------
 
 def _box_filter(image, k, device, dtype):
-    """Apply a k x k box (averaging) filter via conv2d with replicate padding."""
-    pad_size = k // 2
+    """Apply a k x k box (averaging) filter via conv2d with replicate padding.
+
+    Handles both odd and even k by using asymmetric padding so the output
+    size always matches the input size.
+    """
+    pad_before = k // 2
+    pad_after  = k - 1 - pad_before   # == (k-1)//2
     # reshape for conv2d: (1, 1, H, W)
     img_4d = image.unsqueeze(0).unsqueeze(0)
-    img_padded = F.pad(img_4d, (pad_size, pad_size, pad_size, pad_size),
+    img_padded = F.pad(img_4d,
+                       (pad_before, pad_after, pad_before, pad_after),
                        mode='replicate')
     kernel = torch.ones(1, 1, k, k, device=device, dtype=dtype) / (k * k)
     out = F.conv2d(img_padded, kernel)
@@ -309,11 +323,12 @@ def segment(image, cfg=None, *, phi_init=None,
     mu       = cfg["mdl"]["mu"]
     lambda_p = cfg["mdl"]["lambda_p"]
     k        = cfg["mdl"]["k"]
-    dt      = cfg["opt"]["dt"]
-    eps     = cfg["opt"]["epsilon"]
-    maxiter = int(cfg["opt"]["maxiter"])
-    tol_L   = cfg["opt"]["tol_length"]
-    tol_it  = int(cfg["opt"]["tol_iters"])
+    dt         = cfg["opt"]["dt"]
+    eps        = cfg["opt"]["epsilon"]
+    delta_mode = cfg["opt"]["delta_mode"]
+    maxiter    = int(cfg["opt"]["maxiter"])
+    tol_L      = cfg["opt"]["tol_length"]
+    tol_it     = int(cfg["opt"]["tol_iters"])
 
     # ---- prepare image tensors ----
     u0 = to_t(image)
@@ -359,7 +374,14 @@ def segment(image, cfg=None, *, phi_init=None,
         # -- data driving force (inside the delta_eps bracket in Eq. 28a) --
         force_global = alpha * ((u0 - c2)**2 - (u0 - c1)**2)
         force_local  = beta  * ((diff - d2)**2 - (diff - d1)**2)
-        data_force   = delta_phi * (force_global + force_local)
+        if delta_mode == "narrow":
+            # Paper formulation: delta_eps localises force near zero level set.
+            # Can stall when |phi| grows large and delta_eps -> 0.
+            data_force = delta_phi * (force_global + force_local)
+        else:
+            # "wide": drop delta_eps from data force so it acts everywhere.
+            # H_eps is still used for region averaging (c1, c2, d1, d2).
+            data_force = force_global + force_local
 
         # -- curvature and Laplacian --
         kappa = _curvature(phi)
