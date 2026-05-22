@@ -81,12 +81,13 @@ def default_config():
             "k":        15,
         },
         "opt": {
-            "dt":         0.1,
-            "epsilon":    1.0,
-            "delta_mode": "wide",
-            "maxiter":    500,
-            "tol_length": 5.0,
-            "tol_iters":  10,
+            "dt":           0.1,
+            "epsilon":      1.0,
+            "delta_mode":   "wide",
+            "reinit_every": 10,
+            "maxiter":      500,
+            "tol_length":   5.0,
+            "tol_iters":    10,
         },
         "init": {
             "mode":        "checkerboard",
@@ -258,6 +259,49 @@ def _curve_length(phi, eps):
     return (delta * grad_mag).sum().item()
 
 
+def _reinitialise_phi(phi, n_steps=5, dt_reinit=0.5):
+    """Reinitialise phi toward a signed distance function.
+
+    Solves  dphi/dtau = sign(phi_0) * (1 - |grad phi|)  for *n_steps*
+    pseudo-time steps using first-order upwind differences (Sussman et al. 1994).
+    """
+    phi0 = phi.clone()
+    # smoothed sign to avoid discontinuity at phi=0
+    sign_phi = phi0 / torch.sqrt(phi0**2 + 1.0)
+
+    for _ in range(n_steps):
+        # upwind differences
+        # forward / backward differences along each axis
+        Dxm = phi - torch.roll(phi, 1, dims=1)   # backward x
+        Dxp = torch.roll(phi, -1, dims=1) - phi   # forward  x
+        Dym = phi - torch.roll(phi, 1, dims=0)    # backward y
+        Dyp = torch.roll(phi, -1, dims=0) - phi   # forward  y
+
+        # Neumann BC: set boundary differences to 0
+        Dxm[:, 0]  = 0.0;  Dxp[:, -1] = 0.0
+        Dym[0, :]  = 0.0;  Dyp[-1, :] = 0.0
+
+        # Godunov upwind: pick the right one-sided derivative
+        # When sign_phi > 0, phi should increase away from the zero set
+        Gp = torch.sqrt(
+            torch.clamp(Dxm, min=0.0)**2 + torch.clamp(-Dxp, min=0.0)**2 +
+            torch.clamp(Dym, min=0.0)**2 + torch.clamp(-Dyp, min=0.0)**2
+        )
+        Gm = torch.sqrt(
+            torch.clamp(-Dxm, min=0.0)**2 + torch.clamp(Dxp, min=0.0)**2 +
+            torch.clamp(-Dym, min=0.0)**2 + torch.clamp(Dyp, min=0.0)**2
+        )
+
+        S_pos = sign_phi.clamp(min=0.0)
+        S_neg = (-sign_phi).clamp(min=0.0)
+
+        grad_mag = S_pos * Gp + S_neg * Gm
+
+        phi = phi - dt_reinit * sign_phi * (grad_mag - 1.0)
+
+    return phi
+
+
 # ---------------------------------------------------------------------------
 # public entry point
 # ---------------------------------------------------------------------------
@@ -329,6 +373,7 @@ def segment(image, cfg=None, *, phi_init=None,
     maxiter    = int(cfg["opt"]["maxiter"])
     tol_L      = cfg["opt"]["tol_length"]
     tol_it     = int(cfg["opt"]["tol_iters"])
+    reinit_every = int(cfg["opt"].get("reinit_every", 0))
 
     # ---- prepare image tensors ----
     u0 = to_t(image)
@@ -390,10 +435,21 @@ def segment(image, cfg=None, *, phi_init=None,
         # -- length + distance regularisation (Eq. 28a last two terms) --
         # mu * delta(phi) * kappa       = length penalty
         # lambda_p * (lap - kappa)      = distance-function penalty
-        reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
+        if delta_mode == "narrow":
+            reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
+        else:
+            # "wide": also drop delta_eps from the curvature penalty so the
+            # length regularisation acts everywhere, matching the data force.
+            # Without this, delta_eps -> 0 away from the contour kills the
+            # only restoring force, and phi diverges.
+            reg = mu * kappa + lambda_p * (lap - kappa)
 
         # -- explicit Euler step --
         phi = phi + dt * (data_force + reg)
+
+        # -- periodic reinitialization to signed distance function --
+        if reinit_every > 0 and (it + 1) % reinit_every == 0:
+            phi = _reinitialise_phi(phi)
 
         # -- termination criterion (Section 3.5) --
         cur_length = _curve_length(phi, eps_t)
