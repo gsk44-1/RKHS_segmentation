@@ -13,7 +13,7 @@ texture component.  The energy functional is:
 where
     E_G  = global Chan-Vese fitting term  (Eq. 10)
     E_L  = local fitting term on the difference image  g_k * u0 - u0  (Eq. 14)
-    E_R  = nu * length_penalty  +  mu * distance_penalty             (Eq. 22)
+    E_R  = mu * length_penalty  +  lambda_p * distance_penalty         (Eq. 22, lambda_p=1 in paper)
 
 The level set PDE (Eq. 28a) is evolved with explicit forward Euler on a
 regular grid using finite differences (Eq. 34).
@@ -41,10 +41,14 @@ def default_config():
         alpha       : weight on the global Chan-Vese term  (1.0)
         beta        : weight on the local term             (1.0 for homogeneous,
                       0.1 for inhomogeneous images)
-        nu          : length penalty coefficient, formatted as nu_0 * 255^2
-                      with nu_0 in [0, 1].  Default 0.01 * 255^2.
-        mu          : distance-penalty coefficient that removes the need for
-                      re-initialisation  (1.0)
+        mu          : length penalty coefficient, formatted as mu_0 * 255^2
+                      with mu_0 in [0, 1].  Default 0.01 * 255^2.
+                      Smaller mu detects smaller objects; larger mu detects
+                      larger objects.
+        lambda_p    : weight on the distance-function penalty P(phi).
+                      Fixed at 1 in the paper; exposed here because the
+                      effective balance with the data terms shifts with
+                      image intensity range.  (1.0)
         k           : window size of the averaging (box-filter) convolution
                       operator in the local term  (15)
     opt : solver parameters
@@ -65,9 +69,9 @@ def default_config():
         "mdl": {
             "alpha":  1.0,
             "beta":   1.0,
-            "nu":     0.01 * 255**2,
-            "mu":     1.0,
-            "k":      15,
+            "mu":       0.01 * 255**2,
+            "lambda_p": 1.0,
+            "k":        15,
         },
         "opt": {
             "dt":         0.1,
@@ -300,11 +304,11 @@ def segment(image, cfg=None, *, phi_init=None,
     if overrides:
         cfg = _apply_overrides(cfg, overrides)
 
-    alpha   = cfg["mdl"]["alpha"]
-    beta    = cfg["mdl"]["beta"]
-    nu      = cfg["mdl"]["nu"]
-    mu      = cfg["mdl"]["mu"]
-    k       = cfg["mdl"]["k"]
+    alpha    = cfg["mdl"]["alpha"]
+    beta     = cfg["mdl"]["beta"]
+    mu       = cfg["mdl"]["mu"]
+    lambda_p = cfg["mdl"]["lambda_p"]
+    k        = cfg["mdl"]["k"]
     dt      = cfg["opt"]["dt"]
     eps     = cfg["opt"]["epsilon"]
     maxiter = int(cfg["opt"]["maxiter"])
@@ -361,8 +365,10 @@ def segment(image, cfg=None, *, phi_init=None,
         kappa = _curvature(phi)
         lap   = _laplacian(phi)
 
-        # -- length + distance regularisation (Eq. 28a last terms) --
-        reg = nu * delta_phi * kappa + mu * (lap - kappa)
+        # -- length + distance regularisation (Eq. 28a last two terms) --
+        # mu * delta(phi) * kappa       = length penalty
+        # lambda_p * (lap - kappa)      = distance-function penalty
+        reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
 
         # -- explicit Euler step --
         phi = phi + dt * (data_force + reg)
