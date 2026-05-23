@@ -41,10 +41,12 @@ def default_config():
         alpha       : weight on the global Chan-Vese term  (1.0)
         beta        : weight on the local term             (1.0 for homogeneous,
                       0.1 for inhomogeneous images)
-        mu          : length penalty coefficient.  The image is internally
-                      normalised to [0, 1], so mu no longer needs the 255^2
-                      scaling.  Default 0.01.  Smaller mu detects smaller
-                      objects; larger mu detects larger objects.
+        mu          : length penalty coefficient.  Specify as if the image
+                      were in its original range — the code normalises
+                      internally and scales mu accordingly.  For [0, 255]
+                      images the paper uses mu = mu_0 * 255^2 with mu_0
+                      in [0, 1].  Default 0.01 * 255^2.  Smaller mu detects
+                      smaller objects; larger mu detects larger objects.
         lambda_p    : weight on the distance-function penalty P(phi).
                       Fixed at 1 in the paper; exposed here because the
                       effective balance with the data terms shifts with
@@ -88,7 +90,7 @@ def default_config():
         "mdl": {
             "alpha":  1.0,
             "beta":   1.0,
-            "mu":       0.01,
+            "mu":       0.01 * 255**2,
             "lambda_p": 1.0,
             "k":        15,
         },
@@ -402,14 +404,23 @@ def segment(image, cfg=None, *, phi_init=None,
     # is O(255^2) ≈ 65 000, which overwhelms the distance penalty (lambda_p)
     # and forces phi into a steep, pinched profile that overshoots zero,
     # producing ring artifacts around objects.  Normalising to [0, 1] keeps
-    # the data force O(1) so it balances naturally with lambda_p.
+    # the data force O(1).
+    #
+    # The regularisation terms (mu * curvature, lambda_p * distance_penalty)
+    # depend on phi's geometry, not on image intensity.  So they must be
+    # scaled by 1/range^2 to preserve the original balance with the data
+    # force.  This lets the user specify mu and lambda_p as if the image
+    # were in its original range (e.g. mu = 0.01*255^2, lambda_p = 1 for
+    # [0,255] images, matching the paper).
     u0_min = u0.min()
     u0_max = u0.max()
-    u0_range = u0_max - u0_min
-    if u0_range > 0:
-        u0 = (u0 - u0_min) / u0_range
-    else:
-        u0 = u0 - u0_min  # constant image
+    u0_range = (u0_max - u0_min).clamp(min=1e-10)
+    u0 = (u0 - u0_min) / u0_range
+
+    # scale regularisation to match normalised data-force magnitude
+    intensity_scale = (u0_range ** 2).item()
+    mu       = mu       / intensity_scale
+    lambda_p = lambda_p / intensity_scale
 
     # difference image for local term
     u0_avg = _box_filter(u0, k, device, dtype)
