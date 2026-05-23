@@ -55,13 +55,25 @@ def default_config():
         dt          : time step for the explicit Euler update  (0.1)
         epsilon     : width parameter for the smoothed Heaviside / Dirac
                       approximations  (1.0)
-        delta_mode  : 'wide' or 'narrow'.  Controls where the data driving
-                      force is active.  'narrow' (the paper's formulation)
-                      multiplies by delta_eps(phi), which localises the force
-                      near the zero level set — but can stall when phi grows
-                      large.  'wide' replaces delta_eps with 1 in the data
-                      force so it acts everywhere (the Heaviside H_eps is
-                      still used for region averaging).  Default 'wide'.
+        delta_mode  : 'wide', 'narrow', or 'band'.  Controls where the
+                      data driving force is active.
+                      'narrow' (the paper's formulation) multiplies by
+                      delta_eps(phi), which localises the force near the
+                      zero level set — but can stall when phi grows large.
+                      'wide' replaces delta_eps with 1 in the data force so
+                      it acts everywhere (can cause ring artifacts from the
+                      box-filter structure in the local term).
+                      'band' (recommended) uses a Gaussian envelope
+                      exp(-phi^2 / (2 * band_width^2)) to confine the data
+                      force to a neighbourhood of the zero level set that is
+                      wider than delta_eps but still decays to zero, avoiding
+                      both stalling and ring artifacts.  Default 'band'.
+        band_width  : half-width (in level-set units) of the Gaussian
+                      envelope used in 'band' mode.  Should be comparable to
+                      or somewhat larger than the expected cell radius so
+                      the force can reach the contour from the initial
+                      condition, but small enough to decay before the
+                      box-filter transition zone imprints on phi.  (5.0)
         maxiter     : maximum number of iterations  (500)
         tol_length  : threshold on |L(t) - L(t-1)| for the termination
                       criterion  (5.0)
@@ -83,7 +95,8 @@ def default_config():
         "opt": {
             "dt":           0.1,
             "epsilon":      1.0,
-            "delta_mode":   "wide",
+            "delta_mode":   "band",
+            "band_width":   5.0,
             "reinit_every": 10,
             "maxiter":      500,
             "tol_length":   5.0,
@@ -370,6 +383,7 @@ def segment(image, cfg=None, *, phi_init=None,
     dt         = cfg["opt"]["dt"]
     eps        = cfg["opt"]["epsilon"]
     delta_mode = cfg["opt"]["delta_mode"]
+    band_width = cfg["opt"].get("band_width", 5.0)
     maxiter    = int(cfg["opt"]["maxiter"])
     tol_L      = cfg["opt"]["tol_length"]
     tol_it     = int(cfg["opt"]["tol_iters"])
@@ -423,6 +437,12 @@ def segment(image, cfg=None, *, phi_init=None,
             # Paper formulation: delta_eps localises force near zero level set.
             # Can stall when |phi| grows large and delta_eps -> 0.
             data_force = delta_phi * (force_global + force_local)
+        elif delta_mode == "band":
+            # Gaussian envelope: wider than delta_eps so it doesn't stall,
+            # but decays to zero far from the contour so the box-filter
+            # spatial structure in the local term doesn't imprint onto phi.
+            envelope = torch.exp(-phi**2 / (2.0 * band_width**2))
+            data_force = envelope * (force_global + force_local)
         else:
             # "wide": drop delta_eps from data force so it acts everywhere.
             # H_eps is still used for region averaging (c1, c2, d1, d2).
@@ -433,16 +453,11 @@ def segment(image, cfg=None, *, phi_init=None,
         lap   = _laplacian(phi)
 
         # -- length + distance regularisation (Eq. 28a last two terms) --
-        # mu * delta(phi) * kappa       = length penalty
-        # lambda_p * (lap - kappa)      = distance-function penalty
-        if delta_mode == "narrow":
-            reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
-        else:
-            # "wide": keep delta_eps on the curvature (length) penalty so
-            # mean-curvature flow only acts near the zero level set, matching
-            # Eq. 28a.  The distance penalty (lap - kappa) already acts
-            # everywhere and maintains |grad phi| ≈ 1 globally.
-            reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
+        # mu * delta(phi) * kappa       = length penalty  (localised near contour)
+        # lambda_p * (lap - kappa)      = distance-function penalty  (global)
+        # This matches Eq. 28a for all modes: delta_eps confines the length
+        # penalty near the zero level set; the distance penalty acts everywhere.
+        reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
 
         # -- explicit Euler step --
         phi = phi + dt * (data_force + reg)
