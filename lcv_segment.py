@@ -438,11 +438,11 @@ def segment(image, cfg=None, *, phi_init=None,
         if delta_mode == "narrow":
             reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
         else:
-            # "wide": also drop delta_eps from the curvature penalty so the
-            # length regularisation acts everywhere, matching the data force.
-            # Without this, delta_eps -> 0 away from the contour kills the
-            # only restoring force, and phi diverges.
-            reg = mu * kappa + lambda_p * (lap - kappa)
+            # "wide": keep delta_eps on the curvature (length) penalty so
+            # mean-curvature flow only acts near the zero level set, matching
+            # Eq. 28a.  The distance penalty (lap - kappa) already acts
+            # everywhere and maintains |grad phi| ≈ 1 globally.
+            reg = mu * delta_phi * kappa + lambda_p * (lap - kappa)
 
         # -- explicit Euler step --
         phi = phi + dt * (data_force + reg)
