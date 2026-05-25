@@ -251,15 +251,15 @@ def generate_cell_image(shape=(256, 256), background=10.0,
     oblongs = [
         (0.20*H, 0.18*W, 0.10*H, 0.04*W, 0, 210),
         (0.20*H, 0.12*W, 0.09*H, 0.03*W, 0, 190),
-        (0.20*H, 0.38*W, 0.11*H, 0.05*W, 0, 200),
-        (0.25*H, 0.45*W, 0.11*H, 0.05*W, 0, 200),
-        (0.15*H, 0.5*W, 0.11*H, 0.05*W, 0, 200),
+        (0.20*H, 0.38*W, 0.31*H, 0.05*W, 0, 200),
+        (0.25*H, 0.45*W, 0.31*H, 0.05*W, 0, 200),
+        (0.15*H, 0.5*W, 0.31*H, 0.05*W, 0, 200),
     ]
 
     cluster_cy, cluster_cx = 0.65*H, 0.65*W
     radii = [0.07*H, 0.065*H, 0.06*H, 0.055*H, 0.07*H]
     angles = np.linspace(0, 2*np.pi, len(radii), endpoint=False)
-    spacing = 0.09 * H
+    spacing = 0.03 * H
     circles = []
     for a, r in zip(angles, radii):
         cy = cluster_cy + spacing * np.sin(a)
