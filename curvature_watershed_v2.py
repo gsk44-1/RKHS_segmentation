@@ -136,7 +136,8 @@ def compute_ct(image, sigma=2.0, ct_threshold=0.0):
     ct : 2D ndarray of float64
     """
     f = image.astype(np.float64)
-    
+    if sigma > 0:
+        f = gaussian_filter(f, sigma=sigma)
 
     fvv = gaussian_filter(f, sigma=sigma, order=(0,2))
     fuu = gaussian_filter(f, sigma=sigma, order=(2,0))
