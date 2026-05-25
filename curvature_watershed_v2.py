@@ -20,6 +20,7 @@ Dependencies: numpy only (+ matplotlib for demo).
 from __future__ import annotations
 import numpy as np
 from collections import deque
+from scipy.ndimage import gaussian_filter
 
 
 def _gaussian_kernel_1d(sigma, truncate=4.0):
@@ -44,7 +45,7 @@ def _convolve_separable(image, kernel):
     return out
 
 
-def gaussian_filter(image, sigma):
+def gaussian_filter_m(image, sigma):
     if sigma <= 0:
         return image.copy()
     k = _gaussian_kernel_1d(sigma)
@@ -135,14 +136,13 @@ def compute_ct(image, sigma=2.0, ct_threshold=0.0):
     ct : 2D ndarray of float64
     """
     f = image.astype(np.float64)
-    if sigma > 0:
-        f = gaussian_filter(f, sigma=sigma)
+    
 
-    fu = np.gradient(f, axis=0)
-    fv = np.gradient(f, axis=1)
-    fuu = np.gradient(fu, axis=0)
-    fuv = np.gradient(fu, axis=1)
-    fvv = np.gradient(fv, axis=1)
+    fvv = gaussian_filter(f, sigma=sigma, order=(0,2))
+    fuu = gaussian_filter(f, sigma=sigma, order=(2,0))
+    fuv = gaussian_filter(f, sigma=sigma, order=(1,1))
+    fv  = gaussian_filter(f, sigma=sigma, order=(0,1))
+    fu  = gaussian_filter(f, sigma=sigma, order=(1,0))
 
     l = np.sqrt(1.0 + fu**2 + fv**2)
     E = 1.0 + fu**2
@@ -154,7 +154,7 @@ def compute_ct(image, sigma=2.0, ct_threshold=0.0):
     inv_F = -F / det_Ip
     inv_G = E / det_Ip
 
-    inv_l = 1.0 / l
+    inv_l = -1.0 / l #following paper sign convention
     a11 = inv_l * (fuu * inv_E + fuv * inv_F)
     a12 = inv_l * (fuu * inv_F + fuv * inv_G)
     a21 = inv_l * (fuv * inv_E + fvv * inv_F)
@@ -198,7 +198,7 @@ def geodesic_watershed(ct, grad_mag=None, image=None,
     if grad_mag is None:
         img = image.astype(np.float64)
         if sigma_grad > 0:
-            img = gaussian_filter(img, sigma=sigma_grad)
+            img = gaussian_filter_m(img, sigma=sigma_grad)
         gy = np.gradient(img, axis=0)
         gx = np.gradient(img, axis=1)
         grad_mag = np.sqrt(gx**2 + gy**2)
