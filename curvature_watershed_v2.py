@@ -7,10 +7,18 @@ Implements the method from:
 
 2D case: grayscale image f(x,y) as surface (u, v, f(u,v)) in R^3.
 
-Shape matrix:  A = (1/l) * H_f * Ip^{-1}
+Shape matrix (from paper eq. 5):
+
+    A = -II_p * Ip^{-1} = -(1/l) * H_f * Ip^{-1}
+
   H_f = [[fuu, fuv], [fuv, fvv]]
   Ip  = [[1+fu^2, fu*fv], [fu*fv, 1+fv^2]]
   l   = sqrt(1 + fu^2 + fv^2)
+
+Note: the negative sign comes from eq. (5) in the paper: A = -II_p * Ip^{-1}.
+The explicit matrix formula on p.7 of the paper omits this sign, but without
+it the eigenvalues are negative at bright peaks (where they should be positive
+per the paper's own convention that k_i >= 0 at convex dome regions).
 
 Ct = max(k1,0) * max(k2,0)  where k1,k2 = eigenvalues of A.
 
@@ -20,7 +28,6 @@ Dependencies: numpy only (+ matplotlib for demo).
 from __future__ import annotations
 import numpy as np
 from collections import deque
-from scipy.ndimage import gaussian_filter
 
 
 def _gaussian_kernel_1d(sigma, truncate=4.0):
@@ -136,31 +143,45 @@ def compute_ct(image, sigma=2.0, ct_threshold=0.0):
     ct : 2D ndarray of float64
     """
     f = image.astype(np.float64)
+
+    # Mollify once with Gaussian smoothing
     if sigma > 0:
-        f = gaussian_filter(f, sigma=sigma)
+        f = gaussian_filter_m(f, sigma=sigma)
 
-    fvv = gaussian_filter(f, sigma=sigma, order=(0,2))
-    fuu = gaussian_filter(f, sigma=sigma, order=(2,0))
-    fuv = gaussian_filter(f, sigma=sigma, order=(1,1))
-    fv  = gaussian_filter(f, sigma=sigma, order=(0,1))
-    fu  = gaussian_filter(f, sigma=sigma, order=(1,0))
+    # Derivatives via central finite differences (np.gradient).
+    # These give the true derivative sign: fuu < 0 at a peak.
+    fu = np.gradient(f, axis=0)
+    fv = np.gradient(f, axis=1)
+    fuu = np.gradient(fu, axis=0)
+    fuv = np.gradient(fu, axis=1)
+    fvv = np.gradient(fv, axis=1)
 
+    # l = sqrt(1 + fu^2 + fv^2)
     l = np.sqrt(1.0 + fu**2 + fv**2)
+
+    # First fundamental form  Ip = [[E, F], [F, G]]
     E = 1.0 + fu**2
     F = fu * fv
     G = 1.0 + fv**2
-    det_Ip = E * G - F * F
+    det_Ip = E * G - F * F       # always >= 1
 
+    # Inverse of Ip
     inv_E = G / det_Ip
     inv_F = -F / det_Ip
     inv_G = E / det_Ip
 
-    inv_l = -1.0 / l #following paper sign convention
+    # Shape matrix A = -(1/l) * H_f * Ip^{-1}   [paper eq. 5]
+    #
+    # The negative sign is required so that bright peaks (where the
+    # Hessian H_f is negative-definite) yield positive eigenvalues,
+    # matching the paper convention that k_i >= 0 at convex domes.
+    inv_l = -1.0 / l
     a11 = inv_l * (fuu * inv_E + fuv * inv_F)
     a12 = inv_l * (fuu * inv_F + fuv * inv_G)
     a21 = inv_l * (fuv * inv_E + fvv * inv_F)
     a22 = inv_l * (fuv * inv_F + fvv * inv_G)
 
+    # Eigenvalues of 2x2 A via closed form
     trace = a11 + a22
     det = a11 * a22 - a12 * a21
     disc = np.sqrt(np.maximum(trace**2 - 4.0 * det, 0.0))
@@ -168,6 +189,7 @@ def compute_ct(image, sigma=2.0, ct_threshold=0.0):
     k1 = 0.5 * (trace + disc)
     k2 = 0.5 * (trace - disc)
 
+    # Ct = k1^+ * k2^+
     ct = np.maximum(k1, 0.0) * np.maximum(k2, 0.0)
     if ct_threshold > 0:
         ct[ct < ct_threshold] = 0.0
@@ -179,19 +201,6 @@ def geodesic_watershed(ct, grad_mag=None, image=None,
                        min_seed_size=5):
     """
     Seeded watershed using connected components of Ct as markers.
-
-    Parameters
-    ----------
-    ct : 2D ndarray -- curvature seed map
-    grad_mag : 2D ndarray or None -- pre-computed |nabla f|
-    image : 2D ndarray or None -- used to compute grad_mag if not given
-    sigma_grad : float -- smoothing for gradient computation
-    ct_label_threshold : float -- threshold on ct for seed mask
-    min_seed_size : int -- discard tiny seed components
-
-    Returns
-    -------
-    labels : 2D ndarray of int32
     """
     if grad_mag is None and image is None:
         raise ValueError("Provide either grad_mag or image.")
@@ -226,7 +235,6 @@ def geodesic_watershed(ct, grad_mag=None, image=None,
 
 
 def _draw_ellipse(image, cy, cx, ry, rx, angle_deg=0.0, intensity=200.0):
-    """Draw a Gaussian-profile ellipse onto image (in-place)."""
     rows, cols = image.shape
     yy, xx = np.ogrid[:rows, :cols]
     theta = np.deg2rad(angle_deg)
@@ -241,10 +249,6 @@ def _draw_ellipse(image, cy, cx, ry, rx, angle_deg=0.0, intensity=200.0):
 
 def generate_cell_image(shape=(256, 256), background=10.0,
                         noise_std=5.0, seed=42):
-    """
-    Synthetic grayscale image with ~8 cell-like blobs.
-    Mix of oblong ellipses and tightly packed circular shapes.
-    """
     rng = np.random.default_rng(seed)
     img = np.full(shape, background, dtype=np.float64)
     H, W = shape
@@ -265,14 +269,13 @@ def generate_cell_image(shape=(256, 256), background=10.0,
     for a, r in zip(angles, radii):
         cy = cluster_cy + spacing * np.sin(a)
         cx = cluster_cx + spacing * np.cos(a)
-        circles.append((cy, cx, r, r*0.95, 0,
-                        180 + rng.uniform(-10, 10)))
+        circles.append((cy, cx, r, r*0.95, 0, 180 + rng.uniform(-10, 10)))
 
     for cy, cx, ry, rx, angle, intensity in oblongs + circles:
         _draw_ellipse(img, cy, cx, ry, rx, angle, intensity)
 
     if noise_std > 0:
-        img += rng.normal(0, noise_std, size=shape)
+        img = img + rng.normal(0, noise_std, shape)
     return np.clip(img, 0, 255)
 
 
@@ -297,7 +300,7 @@ if __name__ == "__main__":
     print("Running segmentation pipeline ...")
     ct, labels = segment_cells(img, sigma=3.0, ct_threshold=1e-4,
                                min_seed_size=10)
-    print(f"Detected {labels.max()} cells.")
+    print("Detected %d cells." % labels.max())
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     axes[0].imshow(img, cmap="gray")
@@ -307,7 +310,7 @@ if __name__ == "__main__":
     axes[1].set_title("Ct (curvature seeds)")
     axes[1].axis("off")
     axes[2].imshow(labels, cmap="nipy_spectral", interpolation="nearest")
-    axes[2].set_title(f"Watershed labels ({labels.max()} cells)")
+    axes[2].set_title("Watershed labels (%d cells)" % labels.max())
     axes[2].axis("off")
     plt.tight_layout()
     plt.savefig("curvature_watershed_demo.png", dpi=150)
