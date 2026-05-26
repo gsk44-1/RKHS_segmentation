@@ -190,7 +190,7 @@ def _build_gaussian_edge_basis_np(n_gridx, n_gridy, num_dirs, num_offsets=None,
 
 
 def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True,
-                              use_theta=False):
+                              use_theta=False, binarize_coeffs=False):
     """Compute an alternative edge map W*coeffs using a Gaussian bump basis.
 
     The original fit produces Psi*beta where Psi has columns of the form
@@ -215,6 +215,13 @@ def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True,
         If True, use the theta (projected) coefficients instead of beta.
         When nonneg_beta=True, theta is guaranteed nonneg at every iteration,
         so this gives a nonneg edge map.
+    binarize_coeffs : bool
+        If True, replace each coefficient with 1 where it is positive and
+        0 otherwise, before multiplying by the basis.  This produces an
+        equalized edge indicator: every detected edge component contributes
+        equally regardless of its fitted magnitude.  Best combined with
+        use_theta=True and nonneg_beta=True so that the support of the
+        coefficients reflects genuine edge detections.
 
     Returns
     -------
@@ -249,6 +256,9 @@ def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True,
 
     # beta_t is (n2, P) — transpose to (P, n2) for batched matmul
     beta_batch = beta_t.t()                                        # (P, n2)
+
+    if binarize_coeffs:
+        beta_batch = (beta_batch > 0).to(dtype=beta_batch.dtype)
 
     # Recover image shape from Kd
     Kd = result["Kd"]
