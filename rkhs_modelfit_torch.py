@@ -48,6 +48,7 @@ def default_config():
             "alpha_edgesparse": 1.0,
             "nu_tvweight":      1e-3,
             "iota_edgegate":    1e3,
+            "nonneg_beta":      False,
         },
         "bss": {
             "sigma_kerwidth":  12.0,
@@ -146,6 +147,137 @@ def _build_heaviside_basis_np(n_gridx, n_gridy, delta, num_dirs,
         H = H * np.exp(-edge_decay * T_unscaled ** 2)
 
     return H
+
+
+
+def _build_gaussian_edge_basis_np(n_gridx, n_gridy, num_dirs, num_offsets=None,
+                                   gauss_width=10.0):
+    """Build a Gaussian bump edge basis: w_j(x) = exp(-gauss_width * t_j^2).
+
+    Uses the same direction/offset grid as _build_heaviside_basis_np so that
+    the columns are index-aligned: column j here corresponds to the same
+    (theta_j, c_j) pair as column j in Psi.
+
+    Parameters
+    ----------
+    gauss_width : float
+        Width parameter alpha in exp(-alpha * t^2).  Larger = narrower bumps.
+    """
+    nx_denom = max(n_gridx - 1, 1)
+    ny_denom = max(n_gridy - 1, 1)
+    tx = np.arange(n_gridx) / nx_denom
+    ty = np.arange(n_gridy) / ny_denom
+
+    X = np.tile(tx, n_gridy)
+    Y = np.repeat(ty, n_gridx)
+
+    if num_offsets is None:
+        num_offsets = n_gridx * n_gridy
+
+    theta = np.linspace(0.0, 2.0 * np.pi, num_dirs, endpoint=False)
+    c = np.arange(num_offsets) / max(num_offsets - 1, 1)
+
+    C_all = np.tile(c, num_dirs)
+    Theta_all = np.repeat(theta, num_offsets)
+
+    cos_t = np.cos(Theta_all)
+    sin_t = np.sin(Theta_all)
+    T_unscaled = (cos_t[None, :] * X[:, None]
+                  + sin_t[None, :] * Y[:, None]
+                  + C_all[None, :])
+    W = np.exp(-gauss_width * T_unscaled ** 2)
+    return W
+
+
+def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True):
+    """Compute an alternative edge map W*beta using a Gaussian bump basis.
+
+    The original fit produces Psi*beta where Psi has columns of the form
+        psi_j(x) = (0.5 + (1/pi)*arctan(t_j/delta)) * exp(-decay * t_j^2).
+
+    This function builds a *new* basis W with columns
+        w_j(x) = exp(-gauss_width * t_j^2)
+    using the same (direction, offset) grid, then evaluates W*beta with the
+    *already-fitted* beta coefficients.
+
+    Parameters
+    ----------
+    result : dict
+        Output of ``fit_rkhs_decomposition``.
+    gauss_width : float
+        The alpha parameter in exp(-alpha * t^2).  Larger = narrower bumps
+        (more localised edges).
+    return_numpy : bool
+        If True, return a numpy array; otherwise return a torch tensor on
+        the same device as the fitted beta.
+
+    Returns
+    -------
+    Wb_img : ndarray or torch.Tensor, shape (H, W)
+        The edge map W*beta, assembled from patches by overlap averaging
+        (same procedure as Psi*beta).
+    """
+    cfg = result["cfg"]
+    ps      = cfg["ptc"]["patchsize"]
+    overlap = cfg["ptc"]["overlap"]
+    L       = cfg["bss"]["ell_numdirs"]
+    n_off   = cfg["bss"].get("num_offsets", None)
+
+    # Build new basis (float64 numpy, then cast)
+    W_np = _build_gaussian_edge_basis_np(ps, ps, L, num_offsets=n_off,
+                                          gauss_width=gauss_width)
+
+    # Determine device / dtype from fitted beta
+    beta_arr = result["beta"]          # (n2, P) in the returned layout
+    is_numpy = isinstance(beta_arr, np.ndarray)
+    if is_numpy:
+        device = torch.device("cpu")
+        dtype  = torch.float64
+        beta_t = torch.as_tensor(beta_arr, dtype=dtype, device=device)
+    else:
+        device = beta_arr.device
+        dtype  = beta_arr.dtype
+        beta_t = beta_arr
+
+    W_basis = torch.as_tensor(W_np, dtype=dtype, device=device)  # (ps^2, n2)
+
+    # beta_t is (n2, P) — transpose to (P, n2) for batched matmul
+    beta_batch = beta_t.t()                                        # (P, n2)
+
+    # Recover image shape from Kd
+    Kd = result["Kd"]
+    if isinstance(Kd, np.ndarray):
+        im_h, im_w = Kd.shape
+    else:
+        im_h, im_w = Kd.shape
+
+    # Rebuild patch layout and flat indices (must match the fit exactly)
+    layout = _build_patch_layout(im_h, im_w, ps, overlap)
+    grid_x = torch.as_tensor(layout["grid_x"], dtype=torch.long, device=device)
+    grid_y = torch.as_tensor(layout["grid_y"], dtype=torch.long, device=device)
+    top_left = (grid_x[:, None] * im_w + grid_y[None, :]).reshape(-1)
+    k_range = torch.arange(ps * ps, dtype=torch.long, device=device)
+    offsets = (k_range % ps) * im_w + (k_range // ps)
+    patch_flat_idx = top_left[:, None] + offsets[None, :]
+    patch_flat_idx_flat = patch_flat_idx.reshape(-1)
+
+    cnt = torch.zeros(im_h * im_w, dtype=dtype, device=device)
+    cnt.index_add_(0, patch_flat_idx_flat,
+                   torch.ones_like(patch_flat_idx_flat, dtype=dtype))
+    cnt = cnt.reshape(im_h, im_w).clamp(min=1.0)
+
+    # Compute W*beta per patch and scatter-add
+    Wb_patches = beta_batch @ W_basis.T                           # (P, ps^2)
+    Wb_img = torch.zeros(im_h * im_w, dtype=dtype, device=device)
+    Wb_img.index_add_(0, patch_flat_idx_flat, Wb_patches.reshape(-1))
+    Wb_img = Wb_img.reshape(im_h, im_w) / cnt
+
+    if return_numpy and not is_numpy:
+        return Wb_img.detach().cpu().numpy()
+    elif return_numpy:
+        return Wb_img.detach().cpu().numpy()
+    else:
+        return Wb_img
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +572,8 @@ def _patch_update(image_t, state, cache, cfg):
                  + zeta2 * beta_hat
                  - p_hat) / (rho1 + zeta2)
     theta_new = _soft_threshold(beta_new - b1_batch, alpha / rho1)
+    if cfg["mdl"].get("nonneg_beta", False):
+        theta_new = torch.clamp(theta_new, min=0.0)
     b1_new    = b1_batch + theta_new - beta_new
 
     # Roll beta_prev BEFORE overwriting beta_batch (same ordering as numpy).
