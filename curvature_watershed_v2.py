@@ -128,7 +128,7 @@ def _watershed_from_markers(elevation, markers):
     return labels
 
 
-def compute_ct(image, sigma=2.0, ct_threshold=0.0):
+def compute_ct(image, sigma=2.0, eps = 1, ct_threshold=0.0):
     f = image.astype(np.float64)
     rows, cols = f.shape
 
@@ -175,7 +175,7 @@ def compute_ct(image, sigma=2.0, ct_threshold=0.0):
     k2_plus = np.maximum(k2, 0.0)
 
     ct = k1_plus * k2_plus
-    ellip_ct = np.maximum(k1_plus, k2_plus) * (k1 > -1) * (k2 > -1)
+    ellip_ct = np.maximum(k1_plus, k2_plus) * (k1 > -eps) * (k2 > -eps)
     if ct_threshold > 0:
         ct[ct < ct_threshold] = 0.0
     return ct, ellip_ct, k1, k2
