@@ -189,16 +189,17 @@ def _build_gaussian_edge_basis_np(n_gridx, n_gridy, num_dirs, num_offsets=None,
     return W
 
 
-def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True):
-    """Compute an alternative edge map W*beta using a Gaussian bump basis.
+def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True,
+                              use_theta=False):
+    """Compute an alternative edge map W*coeffs using a Gaussian bump basis.
 
     The original fit produces Psi*beta where Psi has columns of the form
         psi_j(x) = (0.5 + (1/pi)*arctan(t_j/delta)) * exp(-decay * t_j^2).
 
     This function builds a *new* basis W with columns
         w_j(x) = exp(-gauss_width * t_j^2)
-    using the same (direction, offset) grid, then evaluates W*beta with the
-    *already-fitted* beta coefficients.
+    using the same (direction, offset) grid, then evaluates W*coeffs with the
+    *already-fitted* coefficients.
 
     Parameters
     ----------
@@ -209,12 +210,16 @@ def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True):
         (more localised edges).
     return_numpy : bool
         If True, return a numpy array; otherwise return a torch tensor on
-        the same device as the fitted beta.
+        the same device as the fitted coefficients.
+    use_theta : bool
+        If True, use the theta (projected) coefficients instead of beta.
+        When nonneg_beta=True, theta is guaranteed nonneg at every iteration,
+        so this gives a nonneg edge map.
 
     Returns
     -------
     Wb_img : ndarray or torch.Tensor, shape (H, W)
-        The edge map W*beta, assembled from patches by overlap averaging
+        The edge map W*coeffs, assembled from patches by overlap averaging
         (same procedure as Psi*beta).
     """
     cfg = result["cfg"]
@@ -227,8 +232,9 @@ def compute_gaussian_edge_map(result, gauss_width=10.0, return_numpy=True):
     W_np = _build_gaussian_edge_basis_np(ps, ps, L, num_offsets=n_off,
                                           gauss_width=gauss_width)
 
-    # Determine device / dtype from fitted beta
-    beta_arr = result["beta"]          # (n2, P) in the returned layout
+    # Select coefficients: theta (projected, nonneg) or beta (raw)
+    coeff_key = "theta" if use_theta else "beta"
+    beta_arr = result[coeff_key]       # (n2, P) in the returned layout
     is_numpy = isinstance(beta_arr, np.ndarray)
     if is_numpy:
         device = torch.device("cpu")
@@ -748,15 +754,38 @@ def fit_rkhs_decomposition(
 
         if verbose:
             beta_l1 = float(torch.sum(torch.abs(state["patch"]["beta"])).item())
+            split_res = float(torch.linalg.norm(
+                state["patch"]["theta"] - state["patch"]["beta"]).item())
             print(f"iter {it+1:3d}/{n_iter}  "
-                  f"residual={residual:.6f}  |beta|_1={beta_l1:.6f}")
+                  f"residual={residual:.6f}  |beta|_1={beta_l1:.6f}  "
+                  f"||theta-beta||={split_res:.6f}")
 
     Kd_out = state["img"]["Kd"]
     Pb_out = state["img"]["Pb"]
     # Transpose patches back to (dim, P) so the return shape matches the
     # numpy reference at call sites that index by [:, pc].
-    d_out    = state["patch"]["d"].t()
-    beta_out = state["patch"]["beta"].t()
+    d_out     = state["patch"]["d"].t()
+    beta_out  = state["patch"]["beta"].t()
+    theta_out = state["patch"]["theta"].t()
+
+    # Primal residual: ||theta - beta|| measures ADMM convergence of the
+    # beta <-> theta splitting.  When nonneg_beta is True, this tells you
+    # how close beta is to satisfying the nonnegativity constraint.
+    primal_res_beta_theta = float(
+        torch.linalg.norm(state["patch"]["theta"] - state["patch"]["beta"]).item()
+    )
+
+    # Build Psi*theta image (scatter-add, same procedure as Psi*beta).
+    # theta is the projected variable, so Psi*theta is guaranteed nonneg
+    # when nonneg_beta=True.
+    Psi = cache["Psi"]
+    idx_flat = cache["patch_flat_idx_flat"]
+    im_h, im_w = cache["im_h"], cache["im_w"]
+    cnt = cache["patch_count"]
+    pt_b = state["patch"]["theta"] @ Psi.T                # (P, ps^2)
+    Pt_img = torch.zeros(im_h * im_w, dtype=cache["dtype"], device=cache["device"])
+    Pt_img.index_add_(0, idx_flat, pt_b.reshape(-1))
+    Pt_img = Pt_img.reshape(im_h, im_w) / cnt
 
     # Raw basis matrices, useful for inspecting conditioning ||K||, ||Psi^T Psi||,
     # rank, column overlap, etc. when sweeping hyperparameters.
@@ -769,21 +798,25 @@ def fit_rkhs_decomposition(
 
     if return_numpy:
         result = {
-            "Kd":       Kd_out.detach().cpu().numpy(),
-            "Psi_beta": Pb_out.detach().cpu().numpy(),
-            "M":        (Kd_out + Pb_out).detach().cpu().numpy(),
-            "d":        d_out.detach().cpu().numpy(),
-            "beta":     beta_out.detach().cpu().numpy(),
-            "matrices": {k: v.detach().cpu().numpy() for k, v in matrices_t.items()},
+            "Kd":        Kd_out.detach().cpu().numpy(),
+            "Psi_beta":  Pb_out.detach().cpu().numpy(),
+            "Psi_theta": Pt_img.detach().cpu().numpy(),
+            "M":         (Kd_out + Pb_out).detach().cpu().numpy(),
+            "d":         d_out.detach().cpu().numpy(),
+            "beta":      beta_out.detach().cpu().numpy(),
+            "theta":     theta_out.detach().cpu().numpy(),
+            "matrices":  {k: v.detach().cpu().numpy() for k, v in matrices_t.items()},
         }
     else:
         result = {
-            "Kd":       Kd_out,
-            "Psi_beta": Pb_out,
-            "M":        Kd_out + Pb_out,
-            "d":        d_out,
-            "beta":     beta_out,
-            "matrices": matrices_t,
+            "Kd":        Kd_out,
+            "Psi_beta":  Pb_out,
+            "Psi_theta": Pt_img,
+            "M":         Kd_out + Pb_out,
+            "d":         d_out,
+            "beta":      beta_out,
+            "theta":     theta_out,
+            "matrices":  matrices_t,
         }
     result.update({
         "cfg":     cfg,
@@ -793,6 +826,7 @@ def fit_rkhs_decomposition(
             "PtP_op":    cache["PtP_op"],
             "L_beta":    cache["L_beta"],
             "zeta2_eff": cache["zeta2_eff"],
+            "primal_res_beta_theta": primal_res_beta_theta,
             "device":    str(device),
             "dtype":     str(dtype),
         },
