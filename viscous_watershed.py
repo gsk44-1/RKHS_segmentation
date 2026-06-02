@@ -47,12 +47,14 @@ implementation produces T >= f, consistent with the f <= T <= phi_{r0}
 inequality and with the closing interpretation.  Flagged, not resolved.
 
 Dependencies: numpy, scipy.ndimage only.
+Performance: the per-level binary closing uses the Euclidean distance
+transform, so cost is O(N) per gray level and independent of the disk radius.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import binary_closing
+from scipy.ndimage import distance_transform_edt
 
 
 # --------------------------------------------------------------------------- #
@@ -60,6 +62,9 @@ from scipy.ndimage import binary_closing
 # --------------------------------------------------------------------------- #
 def disk(radius: float) -> np.ndarray:
     """Flat boolean disk structuring element: {(x, y) : x^2 + y^2 <= r^2}.
+
+    Provided as a utility (e.g. for your own watershed/markers); the internal
+    closing uses an equivalent distance-transform implementation for speed.
 
     A radius < 1 returns a single pixel (the identity structuring element),
     so closing by it is the identity operation.
@@ -75,21 +80,33 @@ def disk(radius: float) -> np.ndarray:
 # binary closing with safe borders
 # --------------------------------------------------------------------------- #
 def _binary_closing_disk(mask: np.ndarray, radius: float) -> np.ndarray:
-    """Flat binary closing of `mask` by a disk of the given radius.
+    """Flat binary closing of `mask` by a Euclidean disk of the given radius.
 
-    The array is padded by (radius + 1) using edge replication before closing
-    and cropped afterwards.  This stops the dilation/erosion pair from eroding
-    foreground that touches the image border (a standard closing artefact),
-    so the closing is computed correctly right up to the edges.
+    Implemented with the Euclidean distance transform rather than an explicit
+    structuring-element pass:
+
+        dilation by disk r : pixels within Euclidean distance r of foreground
+                             -> edt(~mask) <= r
+        erosion  by disk r : foreground pixels with no background within r
+                             -> edt(dilation) > r
+
+    This is bit-for-bit identical to a closing by the boolean disk
+    `disk(r)` (both test dx^2 + dy^2 <= r^2), but runs in O(N) per level
+    independently of r, instead of O(N * disk_area).  That difference is what
+    keeps the full transform from taking minutes on real images.
+
+    The array is padded by (radius + 1) with edge replication before the
+    transform and cropped afterwards, so foreground touching the image border
+    is not spuriously eroded (a standard closing artefact at edges).
     """
     r = int(round(radius))
     if r < 1:
         return mask.astype(bool, copy=True)
-    se = disk(r)
     pad = r + 1
-    padded = np.pad(mask, pad, mode="edge")
-    closed = binary_closing(padded, structure=se)
-    return closed[pad:-pad, pad:-pad]
+    m = np.pad(mask, pad, mode="edge")
+    dil = distance_transform_edt(~m) <= r          # dilation by disk r
+    clo = distance_transform_edt(dil) > r          # erosion  by disk r
+    return clo[pad:-pad, pad:-pad]
 
 
 # --------------------------------------------------------------------------- #
