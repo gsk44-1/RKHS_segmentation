@@ -60,11 +60,13 @@ def align(HE_path, dapi_path, dapi_rot):
     dapi = (dapi - dapi.min())/(dapi.max() - dapi.min())
     
     H = resize(H, dapi.shape, anti_aliasing=True)
+    E = resize(E, dapi.shape, anti_aliasing=True)
     HE_full = resize(HE_full, (dapi.shape[0], dapi.shape[1], 3), anti_aliasing=True)##
 
     fixed = sitk.GetImageFromArray(dapi.astype(np.float32))
     moving = sitk.GetImageFromArray(H.astype(np.float32))
 
+    
     moving_E = sitk.GetImageFromArray(E.astype(np.float32))
 
     HE_full_uint8 = (HE_full * 255).clip(0, 255).astype(np.uint8)
