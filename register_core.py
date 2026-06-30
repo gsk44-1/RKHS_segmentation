@@ -1,3 +1,5 @@
+#problems with this code: the rotation of dapi is fixed to match specific HE image, HE is normalized over all channels insteaed of separately(?) and who knows what happens when images are not square, but this problem is silently fixed by the affine step for near-square images
+
 import SimpleITK as sitk
 import tifffile
 import zarr
@@ -12,17 +14,30 @@ logging.getLogger('tifffile').setLevel(logging.ERROR)
 from skimage.color import rgb2hed
 
 def color_deconvolve_(he_path):
-  with tifffile.TiffFile(he_path) as tif:
-      HE_arr = tif.asarray()
-      hed = rgb2hed(HE_arr)
-      H = hed[..., 0]
-      E = hed[..., 1]
-      return [H, E]
+    with open(he_path, "rb") as f:
+        mag = f.read(8)
+    if mag[:6] == b'\x93NUMPY':
+        HE_arr = np.load(he_path)
+    elif mag[:2] in (b'II', b'MM'):
+        with tifffile.TiffFile(he_path) as tif:
+            HE_arr = tif.asarray()
+    else:
+        raise ValueError(f"unrecognized format: {he_path}")
+    hed = rgb2hed(HE_arr)
+    return [hed[..., 0], hed[..., 1]]
+
   
 def img_arr_(img_path):
-  with tifffile.TiffFile(img_path) as tif:
-      dapi_arr = tif.asarray()
-      return dapi_arr
+    with open(img_path, "rb") as f:
+        mag = f.read(8)
+    if mag[:6] == b'\x93NUMPY':
+        dapi_arr = np.load(img_path)
+    elif mag[:2] in (b'II', b'MM'):
+        with tifffile.TiffFile(img_path) as tif:
+            dapi_arr = tif.asarray()
+    else:
+        raise ValueError(f"unrecognized format: {dapi_arr}")
+    return dapi_arr
 
 def save_tif_(img_path, img_arr):
   tifffile.imwrite(img_path, img_arr)
