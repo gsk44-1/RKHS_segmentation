@@ -65,8 +65,11 @@ def align(HE_path, dapi_path, dapi_rot):
     fixed = sitk.GetImageFromArray(dapi.astype(np.float32))
     moving = sitk.GetImageFromArray(H.astype(np.float32))
 
+    moving_E = sitk.GetImageFromArray(E.astype(np.float32))
+
     HE_full_uint8 = (HE_full * 255).clip(0, 255).astype(np.uint8)
     moving_fullHE = sitk.GetImageFromArray(HE_full_uint8, isVector=True)
+
 
     mask = sitk.TriangleThreshold(fixed, 0, 1)
 
@@ -91,6 +94,14 @@ def align(HE_path, dapi_path, dapi_rot):
         0.0,                    # default pixel value
         moving.GetPixelID())
     
+    registered_E = sitk.Resample(
+        moving_E, 
+        fixed, 
+        total_transf, 
+        sitk.sitkLinear, 
+        0.0, 
+        moving_E.GetPixelID())
+    
     registered_HE = sitk.Resample(
         moving_fullHE, 
         fixed, 
@@ -99,7 +110,7 @@ def align(HE_path, dapi_path, dapi_rot):
         0.0, 
         moving_fullHE.GetPixelID())
     
-    return (registered_H, registered_HE)
+    return (registered_H, registered_E, registered_HE)
     
 
     
