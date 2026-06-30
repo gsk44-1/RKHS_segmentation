@@ -1,4 +1,4 @@
-#problems with this code: the rotation of dapi is fixed to match specific HE image, HE is normalized over all channels insteaed of separately(?) and who knows what happens when images are not square, but this problem is silently fixed by the affine step for near-square images
+#problems with this code:  HE is normalized over all channels insteaed of separately(?) and who knows what happens when images are not square, but this problem is silently fixed by the affine step for near-square images
 
 import SimpleITK as sitk
 import tifffile
@@ -47,7 +47,7 @@ def print_iteration_(reg_method):
         f"{reg_method.GetOptimizerIteration():3} = "
         f"{reg_method.GetMetricValue():.6f}")
 
-def align(HE_path, dapi_path):
+def align(HE_path, dapi_path, dapi_rot):
     [H, E] = color_deconvolve_(HE_path)
     H = (H - H.min())/(H.max() - H.min())
     E = (E - E.min())/(E.max() - E.min())
@@ -56,7 +56,7 @@ def align(HE_path, dapi_path):
     HE_full = (HE_full - HE_full.min())/(HE_full.max() - HE_full.min()) #should this be normalized per channel?
 
     dapi = img_arr_(dapi_path)
-    dapi = np.rot90(dapi, k=-1)
+    dapi = np.rot90(dapi, k=dapi_rot)
     dapi = (dapi - dapi.min())/(dapi.max() - dapi.min())
     
     H = resize(H, dapi.shape, anti_aliasing=True)
