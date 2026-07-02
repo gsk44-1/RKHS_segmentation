@@ -3,14 +3,14 @@ import numpy as np
 from curvature_watershed_v2 import compute_ct
 
 
-def curv_map(img_input):
+def curv_map(img_input, S_response=[-np.pi/4, np.pi/8], C_response=[0, 200]):
     C_map, S_map = compute_ct(img_input, sigma=3.0)
 
-    S_mean, S_std = -np.pi/4, np.pi/8
+    [S_mean, S_std] = S_response
     S_resp = norm.pdf(S_map, loc=S_mean, scale=S_std)
     S_resp = S_resp * np.sqrt(2*np.pi)*S_std# normalize so that the peak is at 1
 
-    C_mean, C_std = 0, 200
+    [C_mean, C_std] = C_response
     C_gaus = norm.pdf(C_map, loc=C_mean, scale=C_std)
     C_gaus = C_gaus * np.sqrt(2*np.pi)*C_std# normalize so that the peak is at 1
     C_resp = (1 - C_gaus)
