@@ -36,4 +36,4 @@ def keyswap_imgs(images, keys=['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p']
     }});
     </script>
     """
-    HTML(html)
+    return html
