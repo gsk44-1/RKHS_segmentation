@@ -105,8 +105,8 @@ def compute_ct_(image, sigma=2.0):
     return casorati, shape_index
 
 
-def curv_map(img_input, S_response=[-np.pi/4, np.pi/8], C_response=[0, 200]):
-    C_map, S_map = compute_ct_(img_input, sigma=3.0)
+def curv_map(img_input, S_response=[-np.pi/4, np.pi/8], C_response=[0, 200], init_smooth = 0):
+    C_map, S_map = compute_ct_(img_input, sigma=init_smooth)
 
     [S_mean, S_std] = S_response
     S_resp = norm.pdf(S_map, loc=S_mean, scale=S_std)
