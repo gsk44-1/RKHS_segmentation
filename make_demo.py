@@ -25,36 +25,145 @@ FINE_DX = fwd.DETECTOR_DX / SS
 
 # --- 1. ground truth ------------------------------------------------------
 
-def nuclei_field(shape_zyx, n_nuclei, rng, dx=FINE_DX, dz=fwd.DZ):
-    """Ellipsoidal nuclei with chromatin texture.
+def nuclei_field(shape_zyx, n_nuclei, rng, dx=FINE_DX, dz=fwd.DZ,
+                 texture=0.35, return_labels=True):
+    """Ellipsoidal nuclei with chromatin texture, plus an instance label map.
 
-    Ellipsoids not spheres, and textured not uniform, because a smooth ball
-    hides exactly the high-frequency behaviour you are trying to inspect --
-    ringing, focus selection, and deconvolution all act on fine detail.
+    Returns (f, labels) where labels is int32, 0 = background and k = the
+    k-th nucleus.
+
+    OVERLAP RESOLUTION. Each nucleus defines a normalized radial distance
+
+        d_k = sqrt( (z-cz)^2/rz^2 + u^2/ry^2 + v^2/rx^2 )
+
+    which equals 1 exactly on its surface. A voxel is labelled by whichever
+    nucleus has the smallest d, and left as background if every d > 1.
+
+    Using d rather than Euclidean distance to the centre means the partition
+    respects each nucleus's size and orientation -- a large nucleus wins more
+    of a contested region, which is what you want. Formally this is a
+    Laguerre/power-style tessellation, not a plain Voronoi diagram; plain
+    Voronoi on centres would cut a big nucleus in half against a small
+    neighbour sitting close to it.
+
+    Rendering is done per-nucleus into a bounding box (~50x faster than
+    broadcasting each ellipsoid over the whole volume).
     """
-    nz, ny, nx = shape_zyx
-    f = np.zeros(shape_zyx)
-    z = np.arange(nz)[:, None, None] * dz
-    y = np.arange(ny)[None, :, None] * dx
-    x = np.arange(nx)[None, None, :] * dx
+    from scipy.ndimage import gaussian_filter, zoom
 
-    for _ in range(n_nuclei):
-        cz = rng.uniform(2, nz - 2) * dz
-        cy, cx = rng.uniform(0, ny) * dx, rng.uniform(0, nx) * dx
-        rz = rng.uniform(2.0, 3.0)                 # nuclei are flattened in z
+    nz, ny, nx = shape_zyx
+    f = np.zeros(shape_zyx, dtype=np.float32)
+    best_d = np.full(shape_zyx, np.inf, dtype=np.float32)
+    labels = np.zeros(shape_zyx, dtype=np.int32)
+
+    for k in range(1, n_nuclei + 1):
+        # MICROTOME TRUNCATION: centres are allowed outside the section, so
+        # nuclei get cut by the top and bottom surfaces exactly as a real
+        # 5 um FFPE section cuts 5-8 um nuclei. Keeping every nucleus whole
+        # (the old cz in [1.5, nz-1.5]) removes a genuinely hard case:
+        # telling a truncated nucleus from a defocused one.
+        cz = rng.uniform(-2.5, nz + 2.5)
+        cy, cx = rng.uniform(0, ny), rng.uniform(0, nx)
+        rz = rng.uniform(2.0, 3.0)                # nuclei are flattened in z
         ry, rx = rng.uniform(2.5, 4.0), rng.uniform(2.5, 4.0)
         th = rng.uniform(0, np.pi)
-        dy_, dx_ = y - cy, x - cx
-        u = dy_ * np.cos(th) + dx_ * np.sin(th)
-        v = -dy_ * np.sin(th) + dx_ * np.cos(th)
-        d = np.sqrt((z - cz)**2 / rz**2 + u**2 / ry**2 + v**2 / rx**2)
-        f += 0.5 * (1 - np.tanh((d - 1.0) / 0.15)) * rng.uniform(0.7, 1.3)
+        amp = rng.uniform(0.7, 1.3)
 
-    # chromatin: coarse mottling inside nuclei, not white noise
-    from scipy.ndimage import gaussian_filter
-    tex = gaussian_filter(rng.normal(0, 1, shape_zyx), sigma=(0.5, 3, 3))
-    tex /= tex.std()
-    return np.clip(f * (1 + 0.35 * tex), 0, None)
+        # bounding box: 1.6x the semi-axes covers the soft edge
+        pz = int(1.6 * rz / dz) + 2
+        py, px = int(1.6 * max(ry, rx) / dx) + 2, int(1.6 * max(ry, rx) / dx) + 2
+        z0, z1 = max(0, int(cz) - pz), min(nz, int(cz) + pz + 1)
+        y0, y1 = max(0, int(cy) - py), min(ny, int(cy) + py + 1)
+        x0, x1 = max(0, int(cx) - px), min(nx, int(cx) + px + 1)
+        if z1 <= z0 or y1 <= y0 or x1 <= x0:
+            continue
+
+        z = (np.arange(z0, z1)[:, None, None] - cz) * dz
+        y = (np.arange(y0, y1)[None, :, None] - cy) * dx
+        x = (np.arange(x0, x1)[None, None, :] - cx) * dx
+        u = y * np.cos(th) + x * np.sin(th)
+        v = -y * np.sin(th) + x * np.cos(th)
+        d = np.sqrt(z**2 / rz**2 + u**2 / ry**2 + v**2 / rx**2).astype(np.float32)
+
+        box = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+        profile = (0.5 * (1 - np.tanh((d - 1.0) / 0.15)) * amp).astype(np.float32)
+
+        # EXCLUSIVE OCCUPANCY. Previously this was `f += profile`, which let
+        # nuclei interpenetrate and made contested voxels 2-3x too bright --
+        # physically impossible, since nuclei have membranes. The winner of
+        # the tessellation now owns both the label and the intensity.
+        win = d < best_d[box]
+        best_d[box] = np.where(win, d, best_d[box])
+        labels[box] = np.where(win, k, labels[box])
+        f[box] = np.where(win, profile, f[box])
+
+    labels[best_d > 1.0] = 0                      # outside every ellipsoid
+
+    if texture:
+        # generate coarse noise at 1/4 scale and upsample: same look, ~8x cheaper
+        small = rng.normal(0, 1, (nz, max(2, ny // 4), max(2, nx // 4)))
+        small = gaussian_filter(small, sigma=(0.5, 0.75, 0.75))
+        tex = zoom(small, (1, ny / small.shape[1], nx / small.shape[2]), order=1)
+        tex = tex[:, :ny, :nx] / (tex.std() + 1e-9)
+        f = np.clip(f * (1 + texture * tex), 0, None).astype(np.float32)
+
+    return (f, labels) if return_labels else f
+
+
+def focal_slice_labels(labels3d, fmap, patch=pipe.FOCUS_PATCH,
+                       ignore_halfdepth=2):
+    """2D target taken at the SAME slice the image was taken at.
+
+    labels3d : (nz, ny, nx) instance map, already on the DETECTOR grid
+    fmap     : the focus map from pipe.focus_map(), same one passed to
+               pipe.extract_focal_substack()
+
+    WHY THIS AND NOT A PROJECTION. morphology_focus is a single deconvolved
+    slice, and extract_focal_substack picks slice fmap[iy,ix] for each 16x16
+    patch. Slicing the label volume at exactly that z makes image and target
+    two views of one volume, so no projection rule is needed at all -- no
+    majority vote, no z-buffer, no focus weighting. Consistency by
+    construction.
+
+    THE IGNORE CLASS. A nucleus that misses the focal slice is not invisible:
+    it contributes out-of-focus haze, and 3D deconvolution drags some of that
+    light back. Labelling those pixels 'background' punishes the model for
+    detecting real signal. So pixels with no in-slice nucleus but a nucleus
+    within +-ignore_halfdepth slices are marked -1 and should be masked out
+    of the loss.
+
+    ignore_halfdepth should track depth of field, roughly lambda*n/NA^2
+    (~0.9 um at NA 0.7), which at 0.75 um steps is about one slice either
+    side. 2 is deliberately generous.
+
+    Returns int32: 0 background, k instance, -1 ignore.
+    """
+    nz, ny, nx = labels3d.shape
+    out = np.zeros((ny, nx), dtype=np.int32)
+    for iy in range(fmap.shape[0]):
+        for ix in range(fmap.shape[1]):
+            z0 = int(np.clip(fmap[iy, ix], 0, nz - 1))
+            ys = slice(iy * patch, min((iy + 1) * patch, ny))
+            xs = slice(ix * patch, min((ix + 1) * patch, nx))
+            in_slice = labels3d[z0, ys, xs]
+            lo = max(0, z0 - ignore_halfdepth)
+            hi = min(nz, z0 + ignore_halfdepth + 1)
+            nearby = (labels3d[lo:hi, ys, xs] > 0).any(axis=0)
+            tile = in_slice.copy()
+            tile[(in_slice == 0) & nearby] = -1
+            out[ys, xs] = tile
+    return out
+
+
+def downsample_labels(labels, factor):
+    """Fine grid -> detector grid. NEAREST NEIGHBOUR ONLY.
+
+    Never average or interpolate a label map: mean of labels 3 and 7 is 5,
+    a nucleus that does not exist. This subsamples, which is standard and
+    slightly biases boundaries; a proper block-mode is more accurate if you
+    care about exact edge pixels.
+    """
+    return labels[..., ::factor, ::factor]   # works for 2D or 3D
 
 
 # --- 2. run -----------------------------------------------------------------
@@ -64,7 +173,7 @@ def main():
     fine = (NZ, FOV_DET * SS, FOV_DET * SS)
 
     print('ground truth ...')
-    truth = nuclei_field(fine, n_nuclei=60, rng=rng)
+    truth, lab3d = nuclei_field(fine, n_nuclei=60, rng=rng)
 
     print('forward model (optics + detector) ...')
     # patch the module constants so forward() uses our scaled grid
@@ -79,7 +188,13 @@ def main():
                                       params=dict(NA=fwd.NA, ni=1.0, ni0=1.0,
                                                   ns=fwd.N_SAMPLE, tg=0, tg0=0))
     psf /= psf.sum()
-    processed = pipe.process_fov(raw, psf, rl_iters=12)
+    processed, fmap = pipe.process_fov(raw, psf, rl_iters=12,
+                                       return_focus_map=True)
+
+    # label map: fine grid -> detector grid, then sliced at the SAME focal
+    # plane the image was sliced at
+    lab3d_det = downsample_labels(lab3d, SS)
+    lab2d = focal_slice_labels(lab3d_det, fmap)
 
     print('stitching 2x2 mosaic ...')
     # reuse the same FOV four times with independent detector noise, so the
@@ -98,25 +213,38 @@ def main():
     truth_det = truth.max(axis=0).reshape(FOV_DET, SS, FOV_DET, SS).mean((1, 3))
     fmap = pipe.focus_map(raw)
 
-    fig, ax = plt.subplots(1, 4, figsize=(20, 5.4))
+    fig, ax = plt.subplots(1, 5, figsize=(25, 5.4))
     panels = [
         (truth_det, 'ground truth $f$ (MIP)', 'gray', None),
+        (lab2d, 'labels at focal slice (grey = ignore)', 'label', None),
         (raw[NZ // 2], 'raw sensor, middle slice (pe)', 'gray', None),
         (processed, 'after pipeline: focus + deconv + BG', 'gray', None),
         (mosaic, '2x2 stitched mosaic', 'gray', None),
     ]
     for a, (img, title, cm, _) in zip(ax, panels):
-        lo, hi = np.percentile(img, [1, 99.5])
-        a.imshow(img, cmap=cm, vmin=lo, vmax=hi, interpolation='nearest')
+        if cm == 'label':
+            shown = np.where(img > 0, (img * 37 % 200) + 40, 0).astype(float)
+            a.imshow(shown, cmap='nipy_spectral', vmin=0, vmax=255,
+                     interpolation='nearest')
+            a.imshow(np.where(img < 0, 1.0, np.nan), cmap='gray_r',
+                     vmin=0, vmax=1.6, interpolation='nearest')
+        else:
+            lo, hi = np.percentile(img, [1, 99.5])
+            a.imshow(img, cmap=cm, vmin=lo, vmax=hi, interpolation='nearest')
         a.set_title(title, fontsize=11)
         a.axis('off')
     # mark the seams so they are findable by eye
     for xy in (step, ):
-        ax[3].axvline(xy + OVERLAP / 2, color='tab:orange', lw=0.6, alpha=0.7)
-        ax[3].axhline(xy + OVERLAP / 2, color='tab:orange', lw=0.6, alpha=0.7)
+        ax[4].axvline(xy + OVERLAP / 2, color='tab:orange', lw=0.6, alpha=0.7)
+        ax[4].axhline(xy + OVERLAP / 2, color='tab:orange', lw=0.6, alpha=0.7)
     plt.tight_layout()
     plt.savefig('dapi_demo.png', dpi=110, bbox_inches='tight')
     print('wrote dapi_demo.png')
+    ids = np.unique(lab2d); ids = ids[ids > 0]
+    print('   %d instances visible, %.1f%% foreground, %.1f%% ignore'
+          % (len(ids), 100 * (lab2d > 0).mean(), 100 * (lab2d < 0).mean()))
+    print('   f.max() = %.2f  (was 3.3 when nuclei could interpenetrate)'
+          % truth.max())
 
     # --- 4. diagnostics ----------------------------------------------------
     fig2, ax2 = plt.subplots(1, 3, figsize=(15, 4.2))

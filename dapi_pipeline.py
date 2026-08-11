@@ -227,14 +227,21 @@ def build_pyramid(img, levels=5):
 # Assemble
 # ----------------------------------------------------------------------
 
-def process_fov(stack, psf, rl_iters=12):
-    """Single FOV: raw sensor stack -> 2D focus image."""
+def process_fov(stack, psf, rl_iters=12, return_focus_map=False):
+    """Single FOV: raw sensor stack -> 2D focus image.
+
+    Set return_focus_map=True to also get the focus map. The label map must
+    be sliced at the SAME z this function used, or image and target describe
+    different planes -- so the caller needs it.
+    """
     stack = correct_distortion(stack)
-    sub = extract_focal_substack(stack, focus_map(stack))
+    fmap = focus_map(stack)
+    sub = extract_focal_substack(stack, fmap)
     dec = richardson_lucy(sub.astype(np.float64), psf, iters=rl_iters)
     dec = remove_background(dec)
     mid = dec[dec.shape[0] // 2]              # DOC: middle slice, not a MIP
-    return add_vignetting(mid)
+    out = add_vignetting(mid)
+    return (out, fmap) if return_focus_map else out
 
 
 if __name__ == '__main__':
