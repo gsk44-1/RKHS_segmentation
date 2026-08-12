@@ -26,7 +26,8 @@ FINE_DX = fwd.DETECTOR_DX / SS
 # --- 1. ground truth ------------------------------------------------------
 
 def nuclei_field(shape_zyx, n_nuclei, rng, dx=FINE_DX, dz=fwd.DZ,
-                 texture=0.35, return_labels=True):
+                 texture=0.35, return_labels=True, section_um=5.0,
+                 section_center=None):
     """Ellipsoidal nuclei with chromatin texture, plus an instance label map.
 
     Returns (f, labels) where labels is int32, 0 = background and k = the
@@ -52,6 +53,18 @@ def nuclei_field(shape_zyx, n_nuclei, rng, dx=FINE_DX, dz=fwd.DZ,
     from scipy.ndimage import gaussian_filter, zoom
 
     nz, ny, nx = shape_zyx
+
+    # SECTION SLAB. Nuclei are confined to a section of thickness section_um
+    # (5 um FFPE by default) sitting inside a taller imaged volume. Letting
+    # them fill all of z -- the previous behaviour -- makes the focus problem
+    # ILL-POSED: every slice contains tissue, the sharpness curve is flat, and
+    # focus_surface fits noise. It also means no single slice can show most
+    # nuclei in focus, since depth of field (~0.9 um at NA 0.7) is far less
+    # than the volume depth.
+    half = 0.5 * section_um / dz
+    zc = nz / 2.0 if section_center is None else section_center
+    z_lo, z_hi = zc - half, zc + half     # centres may sit at the surfaces,
+                                          # so nuclei get microtome-truncated
     f = np.zeros(shape_zyx, dtype=np.float32)
     best_d = np.full(shape_zyx, np.inf, dtype=np.float32)
     labels = np.zeros(shape_zyx, dtype=np.int32)
@@ -62,7 +75,7 @@ def nuclei_field(shape_zyx, n_nuclei, rng, dx=FINE_DX, dz=fwd.DZ,
         # 5 um FFPE section cuts 5-8 um nuclei. Keeping every nucleus whole
         # (the old cz in [1.5, nz-1.5]) removes a genuinely hard case:
         # telling a truncated nucleus from a defocused one.
-        cz = rng.uniform(-2.5, nz + 2.5)
+        cz = rng.uniform(z_lo, z_hi)
         cy, cx = rng.uniform(0, ny), rng.uniform(0, nx)
         rz = rng.uniform(2.0, 3.0)                # nuclei are flattened in z
         ry, rx = rng.uniform(2.5, 4.0), rng.uniform(2.5, 4.0)
@@ -111,47 +124,47 @@ def nuclei_field(shape_zyx, n_nuclei, rng, dx=FINE_DX, dz=fwd.DZ,
 
 
 def focal_slice_labels(labels3d, fmap, patch=pipe.FOCUS_PATCH,
-                       ignore_halfdepth=2):
+                       ignore_halfdepth=0):
     """2D target taken at the SAME slice the image was taken at.
 
     labels3d : (nz, ny, nx) instance map, already on the DETECTOR grid
-    fmap     : the focus map from pipe.focus_map(), same one passed to
-               pipe.extract_focal_substack()
+    fmap     : the focus map passed to pipe.extract_focal_substack()
 
     WHY THIS AND NOT A PROJECTION. morphology_focus is a single deconvolved
-    slice, and extract_focal_substack picks slice fmap[iy,ix] for each 16x16
-    patch. Slicing the label volume at exactly that z makes image and target
-    two views of one volume, so no projection rule is needed at all -- no
-    majority vote, no z-buffer, no focus weighting. Consistency by
-    construction.
+    slice. Slicing the label volume at exactly the z the image was sliced at
+    makes image and target two views of one volume -- no majority vote, no
+    z-buffer, no focus weighting. Consistency by construction.
 
-    THE IGNORE CLASS. A nucleus that misses the focal slice is not invisible:
-    it contributes out-of-focus haze, and 3D deconvolution drags some of that
-    light back. Labelling those pixels 'background' punishes the model for
-    detecting real signal. So pixels with no in-slice nucleus but a nucleus
-    within +-ignore_halfdepth slices are marked -1 and should be masked out
-    of the loss.
+    PER-PIXEL, NOT PER-PATCH. Sampling one integer slice per 16x16 patch
+    quantizes the smooth focus surface onto the patch grid and chops nuclei
+    into rectangles along patch boundaries. This upsamples the surface to
+    pixel resolution and rounds (int() would truncate, biasing half a slice).
 
-    ignore_halfdepth should track depth of field, roughly lambda*n/NA^2
-    (~0.9 um at NA 0.7), which at 0.75 um steps is about one slice either
-    side. 2 is deliberately generous.
+    THE IGNORE CLASS. A nucleus missing the focal slice is not invisible: it
+    contributes out-of-focus haze, and 3D deconvolution drags some of it back.
+    Calling those pixels background punishes the model for detecting real
+    signal, so they are marked -1 and should be masked out of the loss.
+    Set ignore_halfdepth=0 (the default) to disable it: badly defocused
+    nuclei then simply count as background, which is fine if you would
+    rather the model skip very fuzzy nuclei than lose supervision on the
+    boundary pixels the ignore band was swallowing. Nonzero values should
+    track depth of field, ~lambda*n/NA^2 (about 0.9 um at NA 0.7, i.e.
+    roughly one 0.75 um slice either side).
 
     Returns int32: 0 background, k instance, -1 ignore.
     """
     nz, ny, nx = labels3d.shape
-    out = np.zeros((ny, nx), dtype=np.int32)
-    for iy in range(fmap.shape[0]):
-        for ix in range(fmap.shape[1]):
-            z0 = int(np.clip(fmap[iy, ix], 0, nz - 1))
-            ys = slice(iy * patch, min((iy + 1) * patch, ny))
-            xs = slice(ix * patch, min((ix + 1) * patch, nx))
-            in_slice = labels3d[z0, ys, xs]
-            lo = max(0, z0 - ignore_halfdepth)
-            hi = min(nz, z0 + ignore_halfdepth + 1)
-            nearby = (labels3d[lo:hi, ys, xs] > 0).any(axis=0)
-            tile = in_slice.copy()
-            tile[(in_slice == 0) & nearby] = -1
-            out[ys, xs] = tile
+    surf = pipe.upsample_surface(fmap, (ny, nx), patch)
+    z0 = np.clip(np.rint(surf), 0, nz - 1).astype(np.intp)
+
+    out = np.take_along_axis(labels3d, z0[None], axis=0)[0].astype(np.int32)
+
+    if ignore_halfdepth > 0:
+        nearby = np.zeros((ny, nx), dtype=bool)
+        for dz in range(-ignore_halfdepth, ignore_halfdepth + 1):
+            zi = np.clip(z0 + dz, 0, nz - 1)
+            nearby |= np.take_along_axis(labels3d, zi[None], axis=0)[0] > 0
+        out[(out == 0) & nearby] = -1
     return out
 
 
@@ -218,7 +231,7 @@ def main():
     fig, ax = plt.subplots(1, 5, figsize=(25, 5.4))
     panels = [
         (truth_det, 'ground truth $f$ (MIP)', 'gray', None),
-        (lab2d, 'labels at focal slice (grey = ignore)', 'label', None),
+        (lab2d, 'instance labels at focal slice', 'label', None),
         (raw[NZ // 2], 'raw sensor, middle slice (pe)', 'gray', None),
         (processed, 'after pipeline: focus + deconv + BG', 'gray', None),
         (mosaic, '2x2 stitched mosaic', 'gray', None),

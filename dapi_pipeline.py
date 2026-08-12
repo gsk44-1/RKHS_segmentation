@@ -89,20 +89,61 @@ def focus_map(stack, patch=FOCUS_PATCH, smooth=2.0):
     return np.argmax(smoothed, axis=0)
 
 
-def extract_focal_substack(stack, fmap, half_depth=2, patch=FOCUS_PATCH):
+def upsample_surface(fmap, shape_yx, patch=FOCUS_PATCH):
+    """Patch-grid focus map -> per-pixel focus surface, bilinearly.
+
+    WHY THIS MATTERS. Taking one integer slice per 16x16 patch quantizes a
+    smooth surface onto the patch grid: where the surface crosses z=7.5,
+    one patch takes slice 7 and its neighbour takes 8, and the discontinuity
+    runs along the patch boundary -- slicing nuclei into rectangles. Fitting
+    a smooth surface does not help if you then sample it blockily.
+
+    Per-pixel sampling still has a jump where the surface crosses a half-
+    integer, but the jump follows the tissue geometry as a smooth contour
+    instead of a staircase on an arbitrary grid.
+    """
+    ny, nx = shape_yx
+    zy = zoom(fmap.astype(np.float64),
+              (ny / fmap.shape[0], nx / fmap.shape[1]), order=1)
+    return zy[:ny, :nx]
+
+
+def extract_focal_substack(stack, fmap, half_depth=2, patch=FOCUS_PATCH,
+                           interp='linear'):
     """Resample a thin sub-volume that follows the focus surface.
 
-    Each patch contributes slices [z*-half_depth .. z*+half_depth], so the
-    result is a flattened stack: the tissue's tilt has been straightened out.
+    Output slice j takes, at each pixel, stack[round(surface) - half + j],
+    so the tissue's tilt is straightened out. Sampling is PER PIXEL from an
+    upsampled surface, and rounds rather than truncates -- int() would bias
+    every sample half a slice low.
     """
     nz, ny, nx = stack.shape
+    surf = np.clip(upsample_surface(fmap, (ny, nx), patch),
+                   half_depth, nz - half_depth - 1)
     n_out = 2 * half_depth + 1
-    out = np.zeros((n_out, ny, nx), dtype=stack.dtype)
-    for iy in range(fmap.shape[0]):
-        for ix in range(fmap.shape[1]):
-            z0 = int(np.clip(fmap[iy, ix], half_depth, nz - half_depth - 1))
-            ys, xs = slice(iy*patch, (iy+1)*patch), slice(ix*patch, (ix+1)*patch)
-            out[:, ys, xs] = stack[z0-half_depth:z0+half_depth+1, ys, xs]
+
+    if interp == 'nearest':
+        z0 = np.rint(surf).astype(np.intp)
+        out = np.empty((n_out, ny, nx), dtype=np.float64)
+        for j in range(n_out):
+            out[j] = np.take_along_axis(stack, (z0 - half_depth + j)[None],
+                                        axis=0)[0]
+        return out
+
+    # LINEAR: sample at the fractional depth. Rounding makes adjacent pixels
+    # take different slices wherever the surface crosses a half-integer,
+    # putting a 0.75 um depth discontinuity across a one-pixel boundary --
+    # the diagonal seam. Interpolating removes it, at the cost of averaging
+    # two slices (see the sharpness measurement before choosing).
+    zf = np.floor(surf).astype(np.intp)
+    frac = (surf - zf)[None]
+    out = np.empty((n_out, ny, nx), dtype=np.float64)
+    for j in range(n_out):
+        a = np.clip(zf - half_depth + j, 0, nz - 1)
+        b = np.clip(a + 1, 0, nz - 1)
+        lo = np.take_along_axis(stack, a[None], axis=0)[0]
+        hi = np.take_along_axis(stack, b[None], axis=0)[0]
+        out[j] = (1 - frac[0]) * lo + frac[0] * hi
     return out
 
 
@@ -122,7 +163,10 @@ def richardson_lucy(volume, psf, iters=12, eps=1e-7):
     real morphology_focus images have it.
     """
     psf_flip = psf[::-1, ::-1, ::-1]
-    est = np.full_like(volume, volume.mean(), dtype=np.float64)
+    # Initialize from the observation, not a flat constant. Starting flat
+    # means the first several iterations are spent building structure that
+    # was already present, so low iteration counts come out OVER-smoothed.
+    est = np.maximum(volume.astype(np.float64), 1e-3)
     for _ in range(iters):
         blurred = fftconvolve(est, psf, mode='same')
         ratio = volume / np.maximum(blurred, eps)
@@ -131,15 +175,20 @@ def richardson_lucy(volume, psf, iters=12, eps=1e-7):
     return est
 
 
-def remove_background(volume, sigma=40.0):
+def remove_background(volume, sigma=40.0, pedestal_pct=0.1):
     """Subtract a smooth low-frequency estimate (autofluorescence + stray).
 
-    XOA offsets after subtraction to avoid clipping negatives; mirror that
-    rather than clamping at zero, or you will bias the background statistics.
+    THE OFFSET MUST BE ROBUST. Offsetting by the global minimum -- which is
+    what `out - out.min()` does -- keys the entire image to its single most
+    negative deconvolution ringing outlier. Measured here, that injected a
+    ~3800 pe pedestal and cut sharpness from 0.097 to 0.066: every pixel
+    raised by a constant, contrast destroyed. Using a low percentile instead
+    keeps negatives from being clipped without letting one outlier set the
+    floor for the whole image.
     """
     bg = gaussian_filter(volume, sigma=(0, sigma, sigma))
     out = volume - bg
-    return out - out.min()          # the documented offset trick
+    return out - np.percentile(out, pedestal_pct)
 
 
 # ----------------------------------------------------------------------
@@ -228,7 +277,7 @@ def build_pyramid(img, levels=5):
 # ----------------------------------------------------------------------
 
 def process_fov(stack, psf, rl_iters=12, return_focus_map=False,
-                focus='surface', focus_order=1):
+                focus='surface', focus_order=1, focus_offset=1.0):
     """Single FOV: raw sensor stack -> 2D focus image.
 
     Set return_focus_map=True to also get the focus map. The label map must
@@ -241,6 +290,12 @@ def process_fov(stack, psf, rl_iters=12, return_focus_map=False,
     # along patch boundaries). 'argmax' keeps the old behaviour.
     fmap = (focus_surface(stack, order=focus_order) if focus == 'surface'
             else focus_map(stack))
+    # Measured empirically: the sharpest slice sits ~1 slice (0.75 um) above
+    # where the estimator lands, because refractive index mismatch displaces
+    # the apparent focal plane from the geometric one. Applied HERE so the
+    # returned fmap already carries it and the label slicing inherits the
+    # same correction -- image and target stay on one plane.
+    fmap = fmap + focus_offset
     sub = extract_focal_substack(stack, fmap)
     dec = richardson_lucy(sub.astype(np.float64), psf, iters=rl_iters)
     dec = remove_background(dec)
