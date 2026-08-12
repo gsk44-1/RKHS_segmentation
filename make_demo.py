@@ -189,7 +189,8 @@ def main():
                                                   ns=fwd.N_SAMPLE, tg=0, tg0=0))
     psf /= psf.sum()
     processed, fmap = pipe.process_fov(raw, psf, rl_iters=12,
-                                       return_focus_map=True)
+                                       return_focus_map=True,
+                                       focus='surface', focus_order=1)
 
     # label map: fine grid -> detector grid, then sliced at the SAME focal
     # plane the image was sliced at
@@ -203,7 +204,8 @@ def main():
     for _ in range(4):
         prnu, sread = pipe.__dict__.get('_maps', (None, None))
         noisy = raw + rng.normal(0, np.sqrt(np.maximum(raw, 1)) * 0.15)
-        fovs.append(pipe.process_fov(noisy, psf, rl_iters=12))
+        fovs.append(pipe.process_fov(noisy, psf, rl_iters=12,
+                                     focus='surface', focus_order=1))
     step = FOV_DET - OVERLAP
     positions = [(0, 0), (0, step), (step, 0), (step, step)]
     mosaic = pipe.stitch(fovs, positions, overlap=OVERLAP, jitter_px=0.4,
